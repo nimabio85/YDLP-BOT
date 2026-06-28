@@ -2,7 +2,17 @@
 Beautiful message templates for the bot.
 All user-facing text lives here.
 """
+import re
 from typing import Optional
+
+
+def escape_markdown(text: str) -> str:
+    if not text:
+        return ""
+    # Characters that are special in standard Markdown: _ * ` [
+    # We escape them by prefixing a backslash
+    return re.sub(r"([_*`\[])", r"\\\1", str(text))
+
 
 
 def fmt_duration(seconds: int) -> str:
@@ -31,11 +41,12 @@ def fmt_number(n: int) -> str:
 
 def msg_start(username: str, max_mb: int, local_api: bool) -> str:
     tier = "🚀 *2 GB limit active*" if local_api else "⚡ *50 MB limit*"
+    username_esc = escape_markdown(username)
     return (
         f"╔══════════════════════════╗\n"
         f"║   🎬 *MediaFetch Bot*       ║\n"
         f"╚══════════════════════════╝\n\n"
-        f"Hey *{username}*! 👋\n\n"
+        f"Hey *{username_esc}*! 👋\n\n"
         f"I can download from:\n"
         f"  🔴 YouTube  •  🎵 Spotify\n"
         f"  📸 Instagram  •  🎶 SoundCloud\n"
@@ -86,8 +97,8 @@ def msg_help(max_mb: int) -> str:
 # ── Video info card ────────────────────────────────────────────────────────────
 
 def msg_video_card(info: dict, platform: str = "youtube") -> str:
-    title = info.get("title", "Unknown")[:60]
-    uploader = info.get("uploader") or info.get("channel") or "Unknown"
+    title = escape_markdown(info.get("title", "Unknown")[:60])
+    uploader = escape_markdown(info.get("uploader") or info.get("channel") or "Unknown")
     duration = fmt_duration(info.get("duration", 0))
     views = fmt_number(info.get("view_count") or 0)
     likes = fmt_number(info.get("like_count") or 0)
@@ -109,9 +120,9 @@ def msg_video_card(info: dict, platform: str = "youtube") -> str:
 
 
 def msg_spotify_card(track: dict) -> str:
-    name = track.get("name", "Unknown")[:60]
-    artists = ", ".join(a["name"] for a in track.get("artists", []))
-    album = track.get("album", {}).get("name", "Unknown")
+    name = escape_markdown(track.get("name", "Unknown")[:60])
+    artists = escape_markdown(", ".join(a["name"] for a in track.get("artists", [])))
+    album = escape_markdown(track.get("album", {}).get("name", "Unknown"))
     duration = fmt_duration(track.get("duration_ms", 0) // 1000)
     return (
         f"🎵 *{name}*\n\n"
@@ -137,15 +148,18 @@ def msg_search_results(query: str, platform: str, count: int) -> str:
     icons = {
         "youtube": "🔴 YouTube", "soundcloud": "🎶 SoundCloud", "spotify": "🎵 Spotify"
     }
+    query_esc = escape_markdown(query)
     return (
         f"🔍 *{icons.get(platform, platform)} Results*\n\n"
-        f"Query: `{query}`\n"
+        f"Query: `{query_esc}`\n"
         f"Found *{count}* results — pick one below 👇"
     )
 
 
 def msg_search_result_item(i: int, title: str, uploader: str, duration: str) -> str:
-    return f"{i}. *{title[:45]}*\n    👤 {uploader}  •  ⏱ {duration}"
+    title_esc = escape_markdown(title[:45])
+    uploader_esc = escape_markdown(uploader)
+    return f"{i}. *{title_esc}*\n    👤 {uploader_esc}  •  ⏱ {duration}"
 
 
 # ── Download status ────────────────────────────────────────────────────────────
@@ -192,9 +206,10 @@ def msg_uploading(size_mb: float) -> str:
 
 
 def msg_done(title: str, size_mb: float, duration_s: float) -> str:
+    title_esc = escape_markdown(title[:50])
     return (
         f"✅ *Done!*\n\n"
-        f"📄 {title[:50]}\n"
+        f"📄 {title_esc}\n"
         f"📦 {fmt_size(size_mb)}  •  ⏱ took {duration_s:.0f}s"
     )
 
@@ -242,9 +257,10 @@ def msg_error_download_failed() -> str:
 
 
 def msg_error_upload_failed(reason: str) -> str:
+    reason_esc = escape_markdown(reason[:100])
     return (
         f"❌ *Upload Failed*\n\n"
-        f"Reason: `{reason[:100]}`\n\n"
+        f"Reason: `{reason_esc}`\n\n"
         f"Please try again."
     )
 
@@ -273,8 +289,9 @@ def msg_history(entries: list) -> str:
     lines = [f"📋 *Your Last {len(entries)} Downloads*\n"]
     for i, e in enumerate(entries, 1):
         icon = "🎵" if e.get("fmt") == "audio" else "🎬"
+        title_esc = escape_markdown(e.get('title', 'Unknown')[:40])
         lines.append(
-            f"{i}. {icon} *{e.get('title', 'Unknown')[:40]}*\n"
+            f"{i}. {icon} *{title_esc}*\n"
             f"    📦 {fmt_size(e.get('size_mb', 0))}  •  🕐 {e.get('date', '')}"
         )
     return "\n\n".join(lines)
@@ -312,12 +329,15 @@ def msg_thumbnail_pick() -> str:
 # ── Spotify confirm ────────────────────────────────────────────────────────────
 
 def msg_spotify_confirm(track_name: str, artist: str, yt_title: str) -> str:
+    track_name_esc = escape_markdown(track_name)
+    artist_esc = escape_markdown(artist)
+    yt_title_esc = escape_markdown(yt_title[:60])
     return (
         f"🎵 *Spotify Match Found*\n\n"
-        f"*Track:* {track_name}\n"
-        f"*Artist:* {artist}\n\n"
+        f"*Track:* {track_name_esc}\n"
+        f"*Artist:* {artist_esc}\n\n"
         f"📺 *Will download from:*\n"
-        f"`{yt_title[:60]}`\n\n"
+        f"`{yt_title_esc}`\n\n"
         f"Does this look correct? 👇"
     )
 

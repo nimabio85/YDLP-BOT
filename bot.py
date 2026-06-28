@@ -40,7 +40,7 @@ from utils.formatting import (
     msg_error_upload_failed, msg_not_authorized, msg_history,
     msg_admin_stats, msg_thumbnail_pick, msg_spotify_confirm,
     msg_format_audio_pick, msg_search_pick_platform, msg_search_results,
-    msg_search_result_item, fmt_duration, fmt_size,
+    msg_search_result_item, fmt_duration, fmt_size, escape_markdown,
 )
 from utils.keyboards import (
     kb_format_picker, kb_audio_format_picker, kb_compress,
@@ -160,7 +160,7 @@ def is_owner(user_id: int) -> bool:
 # ─── Safe message edit ─────────────────────────────────────────────────────────
 
 async def safe_edit(query, text: str, reply_markup=None):
-    """Edit message — tries caption first, falls back to text."""
+    """Edit message — tries caption first, falls back to text, falls back to plain text."""
     kw = {"parse_mode": ParseMode.MARKDOWN}
     if reply_markup:
         kw["reply_markup"] = reply_markup
@@ -171,6 +171,21 @@ async def safe_edit(query, text: str, reply_markup=None):
         pass
     try:
         await query.edit_message_text(text=text, **kw)
+        return
+    except BadRequest:
+        pass
+
+    # Fallback to plain text if Markdown parsing fails
+    kw_plain = {}
+    if reply_markup:
+        kw_plain["reply_markup"] = reply_markup
+    try:
+        await query.edit_message_caption(caption=text, **kw_plain)
+        return
+    except BadRequest:
+        pass
+    try:
+        await query.edit_message_text(text=text, **kw_plain)
     except BadRequest:
         pass
 
@@ -915,13 +930,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not info:
             await safe_edit(query, "❌ Failed to fetch info.")
             return
-        desc = (info.get("description") or "No description.")[:400]
-        tags = ", ".join((info.get("tags") or [])[:8]) or "none"
+        desc = escape_markdown((info.get("description") or "No description.")[:400])
+        tags = escape_markdown(", ".join((info.get("tags") or [])[:8]) or "none")
+        title_esc = escape_markdown(info.get('title', 'Unknown')[:60])
+        uploader_esc = escape_markdown(info.get('uploader') or info.get('channel') or "Unknown")
         text = (
             f"📊 *Video Info*\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📄 *{info.get('title', 'Unknown')[:60]}*\n"
-            f"👤 {info.get('uploader', 'Unknown')}\n"
+            f"📄 *{title_esc}*\n"
+            f"👤 {uploader_esc}\n"
             f"👁 {info.get('view_count', 0):,}  •  👍 {info.get('like_count', 0):,}\n"
             f"⏱ {fmt_duration(info.get('duration', 0))}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -955,13 +972,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(query, "❌ Could not fetch thumbnail.")
             return
         title = info.get("title", "Thumbnail")
+        title_esc = escape_markdown(title)
         try:
             await query.message.reply_photo(
                 photo=thumb_bytes,
-                caption=f"🖼 *{title[:60]}*",
+                caption=f"🖼 *{title_esc[:60]}*",
                 parse_mode=ParseMode.MARKDOWN,
             )
-            await safe_edit(query, f"🖼 *Thumbnail sent!*\n📄 {title[:50]}")
+            await safe_edit(query, f"🖼 *Thumbnail sent!*\n📄 {title_esc[:50]}")
         except Exception as e:
             logger.warning(f"Failed to send thumbnail bytes: {e}")
             await safe_edit(query, "❌ *Failed to send thumbnail photo.*")
@@ -1039,7 +1057,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not search_query:
             await safe_edit(query, "❌ Search query lost. Try /search again.")
             return
-        await safe_edit(query, f"🔍 Searching *{platform.title()}* for:\n`{search_query}`...")
+        search_query_esc = escape_markdown(search_query)
+        await safe_edit(query, f"🔍 Searching *{platform.title()}* for:\n`{search_query_esc}`...")
         results = await search_platform(search_query, "youtube" if platform == "spotify" else platform)
         if not results:
             await safe_edit(query, "❌ No results found. Try a different query.")
