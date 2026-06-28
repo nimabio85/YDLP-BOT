@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+/tmp/
+*.log
+*.bak
+cookies/*.txt
+cookies.txt
+data/*.json
+data/*.lock
+data/bot.lock

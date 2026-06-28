@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  ytdl-bot:
+    build: .
+    container_name: ytdl-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - /tmp/ytdl-bot:/tmp/ytdl-bot
+      - ./data:/app/data
+      - ./cookies:/app/cookies
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
