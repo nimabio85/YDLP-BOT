@@ -693,11 +693,15 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── URL message handler ───────────────────────────────────────────────────────
 
 async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        await update.message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
+    message = update.effective_message
+    if not message:
         return
 
-    text = update.message.text or ""
+    if not is_allowed(update.effective_user.id):
+        await message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    text = message.text or ""
     match = URL_RE.search(text)
     if not match:
         return
@@ -705,21 +709,21 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     url = match.group(0)
     platform = detect_platform(url)
 
-    await update.message.chat.send_action(ChatAction.TYPING)
+    await message.chat.send_action(ChatAction.TYPING)
 
     # Spotify — skip get_info (DRM), go straight to format picker
     if platform == "spotify":
         k = store_url(url)
         is_playlist = "playlist" in url
         if is_playlist:
-            await update.message.reply_text(
+            await message.reply_text(
                 f"🎵 *Spotify Playlist*\n\n"
                 f"Choose audio format (up to {PLAYLIST_LIMIT} tracks will be downloaded) 👇",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=kb_audio_format_picker(k, "spotify"),
             )
         else:
-            await update.message.reply_text(
+            await message.reply_text(
                 "🎵 *Spotify Track*\n\nChoose your audio format 👇",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=kb_audio_format_picker(k, "spotify"),
@@ -731,7 +735,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not info:
         if platform in IMAGE_PLATFORMS:
-            msg = await update.message.reply_text(
+            msg = await message.reply_text(
                 "🖼 *Fetching media...*",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -744,9 +748,9 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         fpath = files[0]
                         with open(fpath, "rb") as f:
                             if str(fpath).endswith(".mp4"):
-                                await update.message.reply_video(video=f)
+                                await message.reply_video(video=f)
                             else:
-                                await update.message.reply_photo(photo=f)
+                                await message.reply_photo(photo=f)
                     else:
                         # Send in groups of 10 (Telegram limit)
                         for i in range(0, len(files), 10):
@@ -759,7 +763,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                     media.append(InputMediaVideo(media=data))
                                 else:
                                     media.append(InputMediaPhoto(media=data))
-                            await update.message.reply_media_group(media=media)
+                            await message.reply_media_group(media=media)
                     await msg.delete()
                 except Exception as e:
                     logger.error(f"Image send failed: {e}")
@@ -776,7 +780,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
         else:
             k = store_url(url)
-            await update.message.reply_text(
+            await message.reply_text(
                 "📥 *Direct Download?*\n\n"
                 "I couldn't read this as a media page, but it may be a direct file link.\n"
                 "Tap below and I'll try downloading it as a file.",
@@ -788,7 +792,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Duration check
     duration = info.get("duration") or 0
     if duration > MAX_DURATION_SECONDS:
-        await update.message.reply_text(
+        await message.reply_text(
             msg_error_too_long(duration, MAX_DURATION_SECONDS // 3600),
             parse_mode=ParseMode.MARKDOWN,
         )
@@ -801,7 +805,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if thumb:
         try:
-            await update.message.reply_photo(
+            await message.reply_photo(
                 photo=thumb, caption=caption,
                 parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
             )
@@ -809,7 +813,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as e:
             logger.warning(f"Failed to reply with photo (thumb: {thumb}): {e}. Falling back to text.")
 
-    await update.message.reply_text(
+    await message.reply_text(
         caption, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
     )
 
