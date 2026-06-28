@@ -785,14 +785,18 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard = kb_format_picker(k, platform)
 
     if thumb:
-        await update.message.reply_photo(
-            photo=thumb, caption=caption,
-            parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
-        )
-    else:
-        await update.message.reply_text(
-            caption, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
-        )
+        try:
+            await update.message.reply_photo(
+                photo=thumb, caption=caption,
+                parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+            )
+            return
+        except Exception as e:
+            logger.warning(f"Failed to reply with photo (thumb: {thumb}): {e}. Falling back to text.")
+
+    await update.message.reply_text(
+        caption, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+    )
 
 
 # ─── Callback handler ──────────────────────────────────────────────────────────
@@ -951,12 +955,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(query, "❌ Could not fetch thumbnail.")
             return
         title = info.get("title", "Thumbnail")
-        await safe_edit(query, f"🖼 *Thumbnail sent!*\n📄 {title[:50]}")
-        await query.message.reply_photo(
-            photo=thumb_bytes,
-            caption=f"🖼 *{title[:60]}*",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        try:
+            await query.message.reply_photo(
+                photo=thumb_bytes,
+                caption=f"🖼 *{title[:60]}*",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            await safe_edit(query, f"🖼 *Thumbnail sent!*\n📄 {title[:50]}")
+        except Exception as e:
+            logger.warning(f"Failed to send thumbnail bytes: {e}")
+            await safe_edit(query, "❌ *Failed to send thumbnail photo.*")
         return
 
     # Back to format picker
@@ -1073,13 +1081,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = kb_format_picker(nk, platform)
             thumb = info.get("thumbnail")
             if thumb:
-                await query.message.reply_photo(
-                    photo=thumb, caption=caption,
-                    parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
-                )
-                await safe_edit(query, "✅ Result loaded above 👆")
-            else:
-                await safe_edit(query, caption, reply_markup=keyboard)
+                try:
+                    await query.message.reply_photo(
+                        photo=thumb, caption=caption,
+                        parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+                    )
+                    await safe_edit(query, "✅ Result loaded above 👆")
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to reply with search result photo (thumb: {thumb}): {e}. Falling back to text.")
+
+            await safe_edit(query, caption, reply_markup=keyboard)
         return
 
     # Video download
