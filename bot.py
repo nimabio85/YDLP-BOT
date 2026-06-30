@@ -51,7 +51,8 @@ from utils.keyboards import (
 from utils.database import (
     add_history, get_history, record_download, get_stats,
     get_pref, set_pref, is_blocked, block_user, unblock_user,
-    get_blocked_users,
+    get_blocked_users, get_known_user_ids, get_cached_download,
+    set_cached_download,
 )
 
 logging.basicConfig(
@@ -133,6 +134,65 @@ def make_upload_input(path: str, file_obj, callback) -> InputFile:
         filename=Path(path).name,
         read_file_handle=False,
     )
+
+
+def make_download_cache_key(
+    url: str,
+    fmt: str,
+    quality: str,
+    audio_format: str,
+    audio_quality: str,
+) -> str:
+    raw = "|".join([url, fmt, quality, audio_format, audio_quality])
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+async def send_cached_download(query, cached: dict) -> bool:
+    media_type = cached.get("media_type")
+    file_ids = cached.get("file_ids") or []
+    if not media_type or not file_ids:
+        return False
+
+    await safe_edit(query, "♻️ *Cached file found*\n\nSending instantly...")
+    total = len(file_ids)
+    try:
+        for index, file_id in enumerate(file_ids, 1):
+            part_label = f"Part {index}/{total}" if total > 1 else None
+            caption = final_caption(
+                query,
+                f"🎬 {part_label}" if media_type == "video" and part_label else
+                f"📎 {part_label}" if media_type == "document" and part_label else
+                part_label,
+            )
+            if media_type == "audio":
+                await query.message.reply_audio(
+                    audio=file_id,
+                    title=cached.get("title") or "Audio",
+                    performer=cached.get("performer") or "Unknown",
+                    caption=caption,
+                    **UPLOAD_TIMEOUTS,
+                )
+            elif media_type == "document":
+                await query.message.reply_document(
+                    document=file_id,
+                    caption=caption,
+                    **UPLOAD_TIMEOUTS,
+                )
+            else:
+                await query.message.reply_video(
+                    video=file_id,
+                    supports_streaming=True,
+                    caption=caption,
+                    **UPLOAD_TIMEOUTS,
+                )
+        try:
+            await query.message.delete()
+        except Exception:
+            await safe_edit(query, "✅ *Sent from cache.*")
+        return True
+    except Exception as e:
+        logger.warning(f"Cached send failed, will redownload: {e}")
+        return False
 
 def new_job_id(user_id: int, url: str) -> str:
     raw = f"{user_id}:{url}:{time.time()}".encode()
@@ -529,6 +589,20 @@ async def handle_download(
                 await handle_spotify_playlist(query, url, audio_format, audio_quality)
                 return
 
+            cache_key = make_download_cache_key(url, fmt, quality, audio_format, audio_quality)
+            cached = get_cached_download(cache_key)
+            if cached and await send_cached_download(query, cached):
+                add_history(
+                    query.from_user.id,
+                    cached.get("title") or "Cached media",
+                    url,
+                    fmt,
+                    float(cached.get("size_mb") or 0),
+                    platform,
+                )
+                record_download(query.from_user.id, fmt, float(cached.get("size_mb") or 0), True)
+                return
+
             # Show downloading status
             if fmt == "audio":
                 label = "🎵 Audio"
@@ -633,6 +707,8 @@ async def handle_download(
 
                 try:
                     total_parts = len(upload_paths)
+                    sent_file_ids = []
+                    cached_media_type = "video"
                     for index, part_path in enumerate(upload_paths, 1):
                         if cancel_event.is_set():
                             await safe_edit(query, "❌ *Upload cancelled before next part.*")
@@ -651,6 +727,7 @@ async def handle_download(
                         _last_upload_time[0] = 0.0
                         part_name = Path(part_path).name
                         if fmt == "audio" or platform == "spotify":
+                            cached_media_type = "audio"
                             audio_thumb = thumb_bytes or extract_audio_cover(part_path)
                             embed_mp3_metadata(part_path, info or {"title": title, "uploader": artist}, audio_thumb)
                             with open(part_path, "rb") as f:
@@ -659,7 +736,7 @@ async def handle_download(
                                     f,
                                     make_upload_callback("Audio", part_label, part_name),
                                 )
-                                await send_upload(
+                                sent_message = await send_upload(
                                     lambda: upload_call(
                                         upload_file.input_file_content,
                                         query.message.reply_audio,
@@ -671,14 +748,17 @@ async def handle_download(
                                         **UPLOAD_TIMEOUTS,
                                     )
                                 )
+                            if sent_message and sent_message.audio:
+                                sent_file_ids.append(sent_message.audio.file_id)
                         elif platform == "direct" or split_mode == "document":
+                            cached_media_type = "document"
                             with open(part_path, "rb") as f:
                                 upload_file = make_upload_input(
                                     part_path,
                                     f,
                                     make_upload_callback("File", part_label, part_name),
                                 )
-                                await send_upload(
+                                sent_message = await send_upload(
                                     lambda: upload_call(
                                         upload_file.input_file_content,
                                         query.message.reply_document,
@@ -688,14 +768,17 @@ async def handle_download(
                                         **UPLOAD_TIMEOUTS,
                                     )
                                 )
+                            if sent_message and sent_message.document:
+                                sent_file_ids.append(sent_message.document.file_id)
                         else:
+                            cached_media_type = "video"
                             with open(part_path, "rb") as f:
                                 upload_file = make_upload_input(
                                     part_path,
                                     f,
                                     make_upload_callback("Video", part_label, part_name),
                                 )
-                                await send_upload(
+                                sent_message = await send_upload(
                                     lambda: upload_call(
                                         upload_file.input_file_content,
                                         query.message.reply_video,
@@ -705,6 +788,8 @@ async def handle_download(
                                         **UPLOAD_TIMEOUTS,
                                     )
                                 )
+                            if sent_message and sent_message.video:
+                                sent_file_ids.append(sent_message.video.file_id)
 
                     elapsed = time.time() - start_time
                     suffix = f" ({len(upload_paths)} parts)" if len(upload_paths) > 1 else ""
@@ -714,6 +799,15 @@ async def handle_download(
                         await safe_edit(query, msg_done(title + suffix, size_mb, elapsed))
                     add_history(query.from_user.id, title, url, fmt, size_mb, platform)
                     record_download(query.from_user.id, fmt, size_mb, True)
+                    if sent_file_ids:
+                        set_cached_download(cache_key, {
+                            "media_type": cached_media_type,
+                            "file_ids": sent_file_ids,
+                            "title": title,
+                            "performer": artist,
+                            "size_mb": round(size_mb, 1),
+                            "platform": platform,
+                        })
 
                 except Exception as e:
                     logger.error(f"Upload error: {e}")
@@ -813,7 +907,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/block <user_id>`\n"
         "`/unblock <user_id>`\n"
         "`/blocked`\n"
-        "`/stats`",
+        "`/stats`\n"
+        "`/broadcast <message>`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb_admin_panel(),
     )
@@ -853,6 +948,62 @@ async def cmd_blocked(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["🚫 *Blocked Users*"] + [f"`{uid}`" for uid in users]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
+        return
+    text = " ".join(context.args).strip()
+    if not text:
+        await update.message.reply_text("Usage: `/broadcast <message>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    targets = set(get_known_user_ids())
+    targets.update(ALLOWED_USERS)
+    if OWNER_ID:
+        targets.add(OWNER_ID)
+    targets = {uid for uid in targets if uid and not is_blocked(uid)}
+
+    sent = 0
+    failed = 0
+    for user_id in sorted(targets):
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"📢 {text}",
+                disable_web_page_preview=True,
+            )
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.warning(f"Broadcast failed for {user_id}: {e}")
+            failed += 1
+
+    await update.message.reply_text(f"✅ Broadcast complete.\n\nSent: {sent}\nFailed: {failed}")
+
+
+async def cmd_sites(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await update.message.reply_text(
+        "🌐 *Supported Sites*\n\n"
+        "• YouTube / YouTube Shorts\n"
+        "• Instagram posts, reels, stories\n"
+        "• TikTok\n"
+        "• X / Twitter\n"
+        "• Facebook / fb.watch\n"
+        "• Reddit / v.redd.it\n"
+        "• SoundCloud\n"
+        "• Spotify tracks, albums, playlists\n"
+        "• Twitch clips\n"
+        "• Direct files: MP4, MKV, MP3, ZIP, PDF, APK, and more\n"
+        "• Pixeldrain, KrakenFiles, Google Drive direct links\n\n"
+        "Send a link directly, or use `/search <name>`.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
 
 async def cmd_setformat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -1382,6 +1533,7 @@ def main():
             BotCommand("menu", "Open the main menu"),
             BotCommand("help", "Show help"),
             BotCommand("search", "Search media"),
+            BotCommand("sites", "Show supported sites"),
             BotCommand("thumbnail", "Get a YouTube thumbnail"),
             BotCommand("history", "Show download history"),
             BotCommand("setformat", "Set default format"),
@@ -1389,7 +1541,11 @@ def main():
         await application.bot.set_my_commands(public_commands)
         if OWNER_ID:
             await application.bot.set_my_commands(
-                [*public_commands, BotCommand("admin", "Owner admin panel")],
+                [
+                    *public_commands,
+                    BotCommand("admin", "Owner admin panel"),
+                    BotCommand("broadcast", "Broadcast to users"),
+                ],
                 scope=BotCommandScopeChat(chat_id=OWNER_ID),
             )
 
@@ -1411,9 +1567,11 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("sites", cmd_sites))
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CommandHandler("block", cmd_block))
     app.add_handler(CommandHandler("unblock", cmd_unblock))
     app.add_handler(CommandHandler("blocked", cmd_blocked))

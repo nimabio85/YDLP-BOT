@@ -15,6 +15,7 @@ HISTORY_FILE = Path(DATA_PATH) / "history.json"
 STATS_FILE = Path(DATA_PATH) / "stats.json"
 PREFS_FILE = Path(DATA_PATH) / "prefs.json"
 BLOCKED_FILE = Path(DATA_PATH) / "blocked_users.json"
+CACHE_FILE = Path(DATA_PATH) / "file_cache.json"
 
 
 def _load(path: Path) -> dict:
@@ -87,6 +88,40 @@ def get_stats() -> dict:
     data = _load(STATS_FILE)
     data.pop("user_ids", None)
     return data
+
+
+def get_known_user_ids() -> list[int]:
+    users: set[int] = set()
+
+    stats = _load(STATS_FILE)
+    for uid in stats.get("user_ids", []):
+        try:
+            users.add(int(uid))
+        except (TypeError, ValueError):
+            pass
+
+    history = _load(HISTORY_FILE)
+    for uid in history.keys():
+        if str(uid).isdigit():
+            users.add(int(uid))
+
+    return sorted(users)
+
+
+# Cached Telegram file IDs
+
+def get_cached_download(cache_key: str) -> Optional[dict]:
+    data = _load(CACHE_FILE)
+    return data.get(cache_key)
+
+
+def set_cached_download(cache_key: str, entry: dict):
+    data = _load(CACHE_FILE)
+    data[cache_key] = {
+        **entry,
+        "cached_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    _save(CACHE_FILE, data)
 
 
 # ── User preferences ───────────────────────────────────────────────────────────
