@@ -73,6 +73,16 @@ def store_url(url: str) -> str:
 def resolve_url(key: str) -> Optional[str]:
     return _URL_CACHE.get(key)
 
+def final_caption(query, label: str | None = None) -> str:
+    username = "FullSavebot"
+    try:
+        bot = query.message.get_bot()
+        username = getattr(bot, "username", None) or username
+    except Exception:
+        pass
+    text = f"❤️ Downloaded via @{username}"
+    return f"{label}\n{text}" if label else text
+
 def new_job_id(user_id: int, url: str) -> str:
     raw = f"{user_id}:{url}:{time.time()}".encode()
     return hashlib.md5(raw).hexdigest()[:10]
@@ -218,10 +228,10 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
             await safe_edit(query, "❌ *Playlist timed out.*\n\nTry with a smaller playlist or single tracks.")
             return
 
-        # Find downloaded files
+        # Find downloaded files. spotdl may create artist/playlist subfolders.
         files = []
         for ext in [audio_format, "mp3", "m4a", "opus", "flac", "wav"]:
-            files = sorted(Path(tmpdir).glob(f"*.{ext}"))
+            files = sorted(Path(tmpdir).rglob(f"*.{ext}"))
             if files:
                 break
 
@@ -245,6 +255,7 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
                         audio=f,
                         title=fpath.stem,
                         performer="Spotify",
+                        caption=final_caption(query),
                     )
                 sent += 1
                 record_download(query.from_user.id, "audio", sz, True)
@@ -252,7 +263,10 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
                 logger.error(f"Playlist upload track {i} failed: {e}")
                 continue
 
-        await safe_edit(query, f"✅ *Playlist done!*\n\nSent *{sent}/{len(files)}* tracks successfully.")
+        try:
+            await query.message.delete()
+        except Exception:
+            await safe_edit(query, f"✅ *Playlist done!*\n\nSent *{sent}/{len(files)}* tracks successfully.")
 
 
 # ─── Core download + upload ────────────────────────────────────────────────────
@@ -285,15 +299,22 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
         try:
             with open(path, "rb") as f:
                 if path.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv"}:
-                    await query.message.reply_video(video=f, supports_streaming=True)
+                    await query.message.reply_video(
+                        video=f,
+                        supports_streaming=True,
+                        caption=final_caption(query),
+                    )
                 else:
-                    await query.message.reply_photo(photo=f)
+                    await query.message.reply_photo(photo=f, caption=final_caption(query))
             sent += 1
         except Exception as e:
             logger.error(f"Gallery fallback send failed: {e}")
 
     if sent:
-        await safe_edit(query, f"✅ *Sent {sent} media file(s).*")
+        try:
+            await query.message.delete()
+        except Exception:
+            await safe_edit(query, f"✅ *Sent {sent} media file(s).*")
         add_history(query.from_user.id, f"{platform.title()} media", url, "media", total_mb, platform)
         record_download(query.from_user.id, "media", total_mb, True)
         return True
@@ -499,27 +520,29 @@ async def handle_download(
                             with open(part_path, "rb") as f:
                                 await query.message.reply_audio(
                                     audio=f, title=title, performer=artist, thumbnail=thumb_bytes,
+                                    caption=final_caption(query, part_label),
                                 )
                         elif platform == "direct" or split_mode == "document":
-                            caption = f"📎 {part_label}" if part_label else None
                             with open(part_path, "rb") as f:
                                 await query.message.reply_document(
                                     document=f,
                                     filename=Path(part_path).name,
-                                    caption=caption,
+                                    caption=final_caption(query, f"📎 {part_label}" if part_label else None),
                                 )
                         else:
-                            caption = f"🎬 {part_label}" if part_label else None
                             with open(part_path, "rb") as f:
                                 await query.message.reply_video(
                                     video=f,
                                     supports_streaming=True,
-                                    caption=caption,
+                                    caption=final_caption(query, f"🎬 {part_label}" if part_label else None),
                                 )
 
                     elapsed = time.time() - start_time
                     suffix = f" ({len(upload_paths)} parts)" if len(upload_paths) > 1 else ""
-                    await safe_edit(query, msg_done(title + suffix, size_mb, elapsed))
+                    try:
+                        await query.message.delete()
+                    except Exception:
+                        await safe_edit(query, msg_done(title + suffix, size_mb, elapsed))
                     add_history(query.from_user.id, title, url, fmt, size_mb, platform)
                     record_download(query.from_user.id, fmt, size_mb, True)
 
@@ -554,8 +577,15 @@ async def handle_compress_upload(query, url: str, fmt: str, quality: str, platfo
         await safe_edit(query, f"📤 *Uploading compressed video*\n{fmt_size(size_mb)} ⏳")
         try:
             with open(compressed, "rb") as f:
-                await query.message.reply_video(video=f, supports_streaming=True)
-            await safe_edit(query, msg_done(title, size_mb, 0))
+                await query.message.reply_video(
+                    video=f,
+                    supports_streaming=True,
+                    caption=final_caption(query),
+                )
+            try:
+                await query.message.delete()
+            except Exception:
+                await safe_edit(query, msg_done(title, size_mb, 0))
             add_history(query.from_user.id, title, url, fmt, size_mb, platform)
             record_download(query.from_user.id, fmt, size_mb, True)
         except Exception as e:
@@ -748,21 +778,22 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         fpath = files[0]
                         with open(fpath, "rb") as f:
                             if str(fpath).endswith(".mp4"):
-                                await message.reply_video(video=f)
+                                await message.reply_video(video=f, caption=f"❤️ Downloaded via @{context.bot.username}")
                             else:
-                                await message.reply_photo(photo=f)
+                                await message.reply_photo(photo=f, caption=f"❤️ Downloaded via @{context.bot.username}")
                     else:
                         # Send in groups of 10 (Telegram limit)
                         for i in range(0, len(files), 10):
                             batch = files[i:i+10]
                             media = []
-                            for fpath in batch:
+                            for j, fpath in enumerate(batch):
                                 with open(fpath, "rb") as f:
                                     data = f.read()
+                                caption = f"❤️ Downloaded via @{context.bot.username}" if i == 0 and j == 0 else None
                                 if str(fpath).endswith(".mp4"):
-                                    media.append(InputMediaVideo(media=data))
+                                    media.append(InputMediaVideo(media=data, caption=caption))
                                 else:
-                                    media.append(InputMediaPhoto(media=data))
+                                    media.append(InputMediaPhoto(media=data, caption=caption))
                             await message.reply_media_group(media=media)
                     await msg.delete()
                 except Exception as e:
@@ -1087,8 +1118,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if platform == "spotify":
             nk = store_url(url)
             await safe_edit(query,
-                "🎵 *Spotify Track*\n\nChoose your audio format 👇",
-                reply_markup=kb_audio_format_picker(nk, "spotify"),
+                "🎵 *Audio Result*\n\nChoose your audio format 👇",
+                reply_markup=kb_audio_format_picker(nk),
             )
         else:
             info = await get_info(url)

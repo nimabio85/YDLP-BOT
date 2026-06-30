@@ -121,7 +121,28 @@ async def search_platform(query: str, platform: str, max_results: int = 5) -> li
         def _search():
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(search_url, download=False)
-                return info.get("entries", []) if info else []
+                entries = info.get("entries", []) if info else []
+                normalized = []
+                for entry in entries:
+                    if not entry:
+                        continue
+                    item = dict(entry)
+                    webpage_url = item.get("webpage_url") or item.get("original_url")
+                    raw_url = item.get("url") or ""
+                    video_id = item.get("id") or raw_url
+                    if platform == "youtube":
+                        if not webpage_url:
+                            if raw_url.startswith("http"):
+                                webpage_url = raw_url
+                            elif video_id:
+                                webpage_url = f"https://www.youtube.com/watch?v={video_id}"
+                    elif platform == "soundcloud" and not webpage_url and raw_url.startswith("http"):
+                        webpage_url = raw_url
+                    if webpage_url:
+                        item["url"] = webpage_url
+                        item["webpage_url"] = webpage_url
+                        normalized.append(item)
+                return normalized
         return await loop.run_in_executor(None, _search)
     except Exception as e:
         logger.error(f"Search failed: {e}")
@@ -474,29 +495,40 @@ def split_video(input_path: str, out_dir: str, max_part_mb: int) -> list[str]:
     if duration <= 0:
         raise RuntimeError("Could not read video duration for splitting")
 
-    target_mb = max(1, int(max_part_mb * 0.92))
+    target_mb = max(1, int(max_part_mb * 0.82))
     parts = max(2, math.ceil(size_mb / target_mb))
-    part_duration = duration / parts
-    outputs = []
     suffix = source.suffix or ".mp4"
 
-    for index in range(parts):
-        start = index * part_duration
-        output = output_dir / f"{source.stem}.part{index + 1:03d}{suffix}"
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(start),
-            "-i", str(source),
-            "-t", str(part_duration),
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
-            str(output),
-        ]
-        proc = subprocess.run(cmd, capture_output=True, timeout=3600)
-        if proc.returncode != 0 or not output.exists():
-            raise RuntimeError("ffmpeg split failed")
-        outputs.append(str(output))
-    return outputs
+    for attempt in range(8):
+        for old_part in output_dir.glob(f"{source.stem}.part*{suffix}"):
+            old_part.unlink(missing_ok=True)
+
+        part_duration = duration / parts
+        outputs = []
+        for index in range(parts):
+            start = index * part_duration
+            output = output_dir / f"{source.stem}.part{index + 1:03d}{suffix}"
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start),
+                "-i", str(source),
+                "-t", str(part_duration),
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                str(output),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, timeout=3600)
+            if proc.returncode != 0 or not output.exists():
+                raise RuntimeError("ffmpeg split failed")
+            outputs.append(str(output))
+
+        largest_mb = max(Path(part).stat().st_size / (1024 * 1024) for part in outputs)
+        if largest_mb <= max_part_mb:
+            return outputs
+
+        parts = max(parts + 1, math.ceil(parts * largest_mb / max_part_mb) + 1)
+
+    raise RuntimeError("Could not split video below Telegram size limit")
 
 
 def split_file(input_path: str, out_dir: str, max_part_mb: int) -> list[str]:
