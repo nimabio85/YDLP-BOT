@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from telegram import InputFile, Update
-from telegram import BotCommand
+from telegram import BotCommand, BotCommandScopeChat
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters,
@@ -891,6 +891,14 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = message.text or ""
     match = URL_RE.search(text)
     if not match:
+        await message.reply_text(
+            "Send me a media link to download.\n\n"
+            "Examples:\n"
+            "`https://youtu.be/...`\n"
+            "`https://www.instagram.com/reel/...`\n\n"
+            "You can also use `/search <name>` to find a video.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     url = match.group(0)
@@ -1003,6 +1011,22 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await message.reply_text(
         caption, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard,
+    )
+
+
+async def handle_unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
+
+    if not is_allowed(update.effective_user.id):
+        await message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await message.reply_text(
+        "I can download from links. Send a YouTube, Instagram, TikTok, X/Twitter, Facebook, Reddit, SoundCloud, Spotify, or direct file URL.\n\n"
+        "Try `/search <name>` if you do not have a link yet.",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
@@ -1336,7 +1360,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     acquire_process_lock()
     async def post_init(application: Application):
-        await application.bot.set_my_commands([
+        public_commands = [
             BotCommand("start", "Start the bot"),
             BotCommand("menu", "Open the main menu"),
             BotCommand("help", "Show help"),
@@ -1344,8 +1368,13 @@ def main():
             BotCommand("thumbnail", "Get a YouTube thumbnail"),
             BotCommand("history", "Show download history"),
             BotCommand("setformat", "Set default format"),
-            BotCommand("admin", "Owner admin panel"),
-        ])
+        ]
+        await application.bot.set_my_commands(public_commands)
+        if OWNER_ID:
+            await application.bot.set_my_commands(
+                [*public_commands, BotCommand("admin", "Owner admin panel")],
+                scope=BotCommandScopeChat(chat_id=OWNER_ID),
+            )
 
     builder = (
         Application.builder()
@@ -1375,6 +1404,7 @@ def main():
     app.add_handler(CommandHandler("thumbnail", cmd_thumbnail))
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_message))
+    app.add_handler(MessageHandler(~filters.COMMAND, handle_unknown_message))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
     logger.info("✅ Bot started.")
