@@ -52,6 +52,8 @@ ENABLE_ARIA2: bool = os.getenv("ENABLE_ARIA2", "false").lower() in {"1", "true",
 
 # ── Limits ─────────────────────────────────────────────────────────────────────
 MAX_DURATION_SECONDS: int = int(os.getenv("MAX_DURATION_SECONDS", str(3 * 3600)))  # 3h
+CACHE_TTL_DAYS: int = int(os.getenv("CACHE_TTL_DAYS", "60"))
+CACHE_MAX_ENTRIES: int = int(os.getenv("CACHE_MAX_ENTRIES", "1000"))
 
 # ── Spotify ────────────────────────────────────────────────────────────────────
 SPOTIFY_CLIENT_ID: str = os.getenv("SPOTIFY_CLIENT_ID", "")

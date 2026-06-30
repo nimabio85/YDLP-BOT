@@ -3,7 +3,7 @@ Simple JSON-based persistent storage for history, stats, user prefs.
 """
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -122,6 +122,45 @@ def set_cached_download(cache_key: str, entry: dict):
         "cached_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     _save(CACHE_FILE, data)
+
+
+def delete_cached_download(cache_key: str):
+    data = _load(CACHE_FILE)
+    if cache_key in data:
+        data.pop(cache_key, None)
+        _save(CACHE_FILE, data)
+
+
+def cleanup_download_cache(ttl_days: int = 60, max_entries: int = 1000) -> int:
+    data = _load(CACHE_FILE)
+    if not data:
+        return 0
+
+    now = datetime.now()
+    cutoff = now - timedelta(days=max(1, ttl_days))
+    kept: list[tuple[str, dict, datetime]] = []
+    removed = 0
+
+    for key, entry in data.items():
+        cached_at_raw = entry.get("cached_at", "")
+        try:
+            cached_at = datetime.strptime(cached_at_raw, "%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            cached_at = now
+        if cached_at < cutoff:
+            removed += 1
+            continue
+        kept.append((key, entry, cached_at))
+
+    kept.sort(key=lambda item: item[2], reverse=True)
+    if max_entries > 0 and len(kept) > max_entries:
+        removed += len(kept) - max_entries
+        kept = kept[:max_entries]
+
+    cleaned = {key: entry for key, entry, _ in kept}
+    if removed:
+        _save(CACHE_FILE, cleaned)
+    return removed
 
 
 # ── User preferences ───────────────────────────────────────────────────────────

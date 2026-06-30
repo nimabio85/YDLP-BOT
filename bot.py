@@ -25,7 +25,7 @@ from config import (
     BOT_TOKEN, OWNER_ID, MAX_FILE_SIZE_MB,
     ALLOWED_USERS, DOWNLOAD_PATH, LOCAL_API_URL,
     MAX_CONCURRENT_DOWNLOADS, MAX_DURATION_SECONDS, COOKIES_FILE,
-    ENABLE_ARIA2, DATA_PATH,
+    ENABLE_ARIA2, DATA_PATH, CACHE_TTL_DAYS, CACHE_MAX_ENTRIES,
 )
 from utils.downloader import (
     detect_platform, get_info, download_media, download_spotify,
@@ -52,7 +52,7 @@ from utils.database import (
     add_history, get_history, record_download, get_stats,
     get_pref, set_pref, is_blocked, block_user, unblock_user,
     get_blocked_users, get_known_user_ids, get_cached_download,
-    set_cached_download,
+    set_cached_download, delete_cached_download, cleanup_download_cache,
 )
 
 logging.basicConfig(
@@ -74,15 +74,40 @@ def store_url(url: str) -> str:
 def resolve_url(key: str) -> Optional[str]:
     return _URL_CACHE.get(key)
 
-def final_caption(query, label: str | None = None) -> str:
+def build_final_caption(
+    username: str,
+    label: str | None = None,
+    title: str | None = None,
+    platform: str | None = None,
+    url: str | None = None,
+) -> str:
+    lines = []
+    if label:
+        lines.append(label)
+    if title:
+        clean_title = " ".join(str(title).split())
+        lines.append(f"🎬 {clean_title[:120]}")
+    if platform:
+        lines.append(f"🔗 {platform.title()}")
+    elif url:
+        lines.append("🔗 Source")
+    lines.append(f"❤️ Downloaded via @{username}")
+    return "\n".join(lines)
+
+def final_caption(
+    query,
+    label: str | None = None,
+    title: str | None = None,
+    platform: str | None = None,
+    url: str | None = None,
+) -> str:
     username = "FullSavebot"
     try:
         bot = query.message.get_bot()
         username = getattr(bot, "username", None) or username
     except Exception:
         pass
-    text = f"❤️ Downloaded via @{username}"
-    return f"{label}\n{text}" if label else text
+    return build_final_caption(username, label, title, platform, url)
 
 async def send_upload(send_factory):
     for attempt in range(2):
@@ -147,7 +172,7 @@ def make_download_cache_key(
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-async def send_cached_download(query, cached: dict) -> bool:
+async def send_cached_download(query, cache_key: str, cached: dict) -> bool:
     media_type = cached.get("media_type")
     file_ids = cached.get("file_ids") or []
     if not media_type or not file_ids:
@@ -163,6 +188,8 @@ async def send_cached_download(query, cached: dict) -> bool:
                 f"🎬 {part_label}" if media_type == "video" and part_label else
                 f"📎 {part_label}" if media_type == "document" and part_label else
                 part_label,
+                title=cached.get("title"),
+                platform=cached.get("platform"),
             )
             if media_type == "audio":
                 await query.message.reply_audio(
@@ -192,6 +219,7 @@ async def send_cached_download(query, cached: dict) -> bool:
         return True
     except Exception as e:
         logger.warning(f"Cached send failed, will redownload: {e}")
+        delete_cached_download(cache_key)
         return False
 
 def new_job_id(user_id: int, url: str) -> str:
@@ -397,7 +425,12 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
                             title=fpath.stem,
                             performer="Spotify",
                             thumbnail=cover_bytes,
-                            caption=final_caption(query),
+                            caption=final_caption(
+                                query,
+                                title=fpath.stem,
+                                platform="spotify",
+                                url=url,
+                            ),
                             **UPLOAD_TIMEOUTS,
                         )
                     )
@@ -449,7 +482,7 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
                             query.message.reply_video,
                             video=f,
                             supports_streaming=True,
-                            caption=final_caption(query),
+                            caption=final_caption(query, title=path.stem, platform=platform, url=url),
                             **UPLOAD_TIMEOUTS,
                         )
                     )
@@ -459,7 +492,7 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
                             f,
                             query.message.reply_photo,
                             photo=f,
-                            caption=final_caption(query),
+                            caption=final_caption(query, title=path.stem, platform=platform, url=url),
                             **UPLOAD_TIMEOUTS,
                         )
                     )
@@ -591,7 +624,7 @@ async def handle_download(
 
             cache_key = make_download_cache_key(url, fmt, quality, audio_format, audio_quality)
             cached = get_cached_download(cache_key)
-            if cached and await send_cached_download(query, cached):
+            if cached and await send_cached_download(query, cache_key, cached):
                 add_history(
                     query.from_user.id,
                     cached.get("title") or "Cached media",
@@ -744,7 +777,13 @@ async def handle_download(
                                         title=title,
                                         performer=artist,
                                         thumbnail=audio_thumb,
-                                        caption=final_caption(query, part_label),
+                                        caption=final_caption(
+                                            query,
+                                            part_label,
+                                            title=title,
+                                            platform=platform,
+                                            url=url,
+                                        ),
                                         **UPLOAD_TIMEOUTS,
                                     )
                                 )
@@ -764,7 +803,13 @@ async def handle_download(
                                         query.message.reply_document,
                                         document=upload_file,
                                         filename=Path(part_path).name,
-                                        caption=final_caption(query, f"📎 {part_label}" if part_label else None),
+                                        caption=final_caption(
+                                            query,
+                                            f"📎 {part_label}" if part_label else None,
+                                            title=title,
+                                            platform=platform,
+                                            url=url,
+                                        ),
                                         **UPLOAD_TIMEOUTS,
                                     )
                                 )
@@ -784,7 +829,13 @@ async def handle_download(
                                         query.message.reply_video,
                                         video=upload_file,
                                         supports_streaming=True,
-                                        caption=final_caption(query, f"🎬 {part_label}" if part_label else None),
+                                        caption=final_caption(
+                                            query,
+                                            f"🎬 {part_label}" if part_label else None,
+                                            title=title,
+                                            platform=platform,
+                                            url=url,
+                                        ),
                                         **UPLOAD_TIMEOUTS,
                                     )
                                 )
@@ -846,7 +897,7 @@ async def handle_compress_upload(query, url: str, fmt: str, quality: str, platfo
                         query.message.reply_video,
                         video=f,
                         supports_streaming=True,
-                        caption=final_caption(query),
+                        caption=final_caption(query, title=title, platform=platform, url=url),
                         **UPLOAD_TIMEOUTS,
                     )
                 )
@@ -1109,11 +1160,17 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     from telegram import InputMediaPhoto, InputMediaVideo
                     if len(files) == 1:
                         fpath = files[0]
+                        media_caption = build_final_caption(
+                            context.bot.username,
+                            title=Path(fpath).stem,
+                            platform=platform,
+                            url=url,
+                        )
                         with open(fpath, "rb") as f:
                             if str(fpath).endswith(".mp4"):
-                                await message.reply_video(video=f, caption=f"❤️ Downloaded via @{context.bot.username}")
+                                await message.reply_video(video=f, caption=media_caption)
                             else:
-                                await message.reply_photo(photo=f, caption=f"❤️ Downloaded via @{context.bot.username}")
+                                await message.reply_photo(photo=f, caption=media_caption)
                     else:
                         # Send in groups of 10 (Telegram limit)
                         for i in range(0, len(files), 10):
@@ -1122,7 +1179,15 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                             for j, fpath in enumerate(batch):
                                 with open(fpath, "rb") as f:
                                     data = f.read()
-                                caption = f"❤️ Downloaded via @{context.bot.username}" if i == 0 and j == 0 else None
+                                caption = (
+                                    build_final_caption(
+                                        context.bot.username,
+                                        title=f"{platform.title()} media",
+                                        platform=platform,
+                                        url=url,
+                                    )
+                                    if i == 0 and j == 0 else None
+                                )
                                 if str(fpath).endswith(".mp4"):
                                     media.append(InputMediaVideo(media=data, caption=caption))
                                 else:
@@ -1528,6 +1593,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     acquire_process_lock()
     async def post_init(application: Application):
+        removed_cache_entries = cleanup_download_cache(CACHE_TTL_DAYS, CACHE_MAX_ENTRIES)
+        if removed_cache_entries:
+            logger.info(f"Cleaned {removed_cache_entries} cached file_id entrie(s).")
+
         public_commands = [
             BotCommand("start", "Start the bot"),
             BotCommand("menu", "Open the main menu"),
