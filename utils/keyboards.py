@@ -108,18 +108,12 @@ def kb_search_platform() -> InlineKeyboardMarkup:
 
 
 def kb_search_results(results: list, platform: str) -> InlineKeyboardMarkup:
-    from hashlib import md5
     rows = []
     for i, r in enumerate(results[:5]):
         title = (r.get("title") or r.get("name") or "Unknown")[:35]
-        url = r.get("url") or r.get("webpage_url") or ""
-        k = md5(url.encode()).hexdigest()[:8]
-        # Store in the module-level cache via import
-        try:
-            from bot import _URL_CACHE
-            _URL_CACHE[k] = url
-        except Exception:
-            pass
+        k = r.get("_cache_key")
+        if not k:
+            continue
         rows.append([InlineKeyboardButton(
             f"{i+1}. {title}",
             callback_data=f"searchr|{platform}|{k}",

@@ -19,7 +19,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters,
 )
 from telegram.constants import ParseMode, ChatAction
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError, TimedOut
 
 from config import (
     BOT_TOKEN, OWNER_ID, MAX_FILE_SIZE_MB,
@@ -82,6 +82,19 @@ def final_caption(query, label: str | None = None) -> str:
         pass
     text = f"❤️ Downloaded via @{username}"
     return f"{label}\n{text}" if label else text
+
+async def send_upload(send_factory):
+    for attempt in range(2):
+        try:
+            return await send_factory()
+        except (TimedOut, NetworkError):
+            if attempt:
+                raise
+            await asyncio.sleep(3)
+
+def upload_call(file_obj, method, **kwargs):
+    file_obj.seek(0)
+    return method(**kwargs)
 
 def new_job_id(user_id: int, url: str) -> str:
     raw = f"{user_id}:{url}:{time.time()}".encode()
@@ -150,6 +163,18 @@ THUMBNAIL_QUALITY_MAP = {
     "mq": "mqdefault",
     "lq": "default",
 }
+UPLOAD_TIMEOUTS = {
+    "read_timeout": 900,
+    "write_timeout": 900,
+    "connect_timeout": 60,
+    "pool_timeout": 60,
+}
+SPLIT_PART_LIMIT_MB = MAX_FILE_SIZE_MB
+if not LOCAL_API_URL:
+    if MAX_FILE_SIZE_MB <= 10:
+        SPLIT_PART_LIMIT_MB = max(1, MAX_FILE_SIZE_MB - 1)
+    else:
+        SPLIT_PART_LIMIT_MB = max(8, min(MAX_FILE_SIZE_MB - 5, int(MAX_FILE_SIZE_MB * 0.75)))
 # Platforms that only support video (no audio-only streams worth downloading)
 VIDEO_ONLY_PLATFORMS = set()
 # Platforms that can be attempted through yt-dlp even when they are not named.
@@ -251,11 +276,16 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
                 await safe_edit(query, f"📤 Uploading track *{i}/{len(files)}*\n`{fpath.stem[:40]}`")
                 sz = fpath.stat().st_size / (1024 * 1024)
                 with open(fpath, "rb") as f:
-                    await query.message.reply_audio(
-                        audio=f,
-                        title=fpath.stem,
-                        performer="Spotify",
-                        caption=final_caption(query),
+                    await send_upload(
+                        lambda: upload_call(
+                            f,
+                            query.message.reply_audio,
+                            audio=f,
+                            title=fpath.stem,
+                            performer="Spotify",
+                            caption=final_caption(query),
+                            **UPLOAD_TIMEOUTS,
+                        )
                     )
                 sent += 1
                 record_download(query.from_user.id, "audio", sz, True)
@@ -299,13 +329,26 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
         try:
             with open(path, "rb") as f:
                 if path.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv"}:
-                    await query.message.reply_video(
-                        video=f,
-                        supports_streaming=True,
-                        caption=final_caption(query),
+                    await send_upload(
+                        lambda: upload_call(
+                            f,
+                            query.message.reply_video,
+                            video=f,
+                            supports_streaming=True,
+                            caption=final_caption(query),
+                            **UPLOAD_TIMEOUTS,
+                        )
                     )
                 else:
-                    await query.message.reply_photo(photo=f, caption=final_caption(query))
+                    await send_upload(
+                        lambda: upload_call(
+                            f,
+                            query.message.reply_photo,
+                            photo=f,
+                            caption=final_caption(query),
+                            **UPLOAD_TIMEOUTS,
+                        )
+                    )
             sent += 1
         except Exception as e:
             logger.error(f"Gallery fallback send failed: {e}")
@@ -461,17 +504,17 @@ async def handle_download(
                         query,
                         f"✂️ *Splitting file*\n\n"
                         f"Size: *{fmt_size(size_mb)}*\n"
-                        f"Part limit: *{fmt_size(MAX_FILE_SIZE_MB)}*",
+                        f"Part limit: *{fmt_size(SPLIT_PART_LIMIT_MB)}*",
                     )
                     try:
                         if fmt == "video":
                             upload_paths = await loop.run_in_executor(
-                                None, split_video, filepath, split_dir, MAX_FILE_SIZE_MB
+                                None, split_video, filepath, split_dir, SPLIT_PART_LIMIT_MB
                             )
                             split_mode = "video"
                         else:
                             upload_paths = await loop.run_in_executor(
-                                None, split_file, filepath, split_dir, MAX_FILE_SIZE_MB
+                                None, split_file, filepath, split_dir, SPLIT_PART_LIMIT_MB
                             )
                             split_mode = "document"
                     except Exception as e:
@@ -518,23 +561,41 @@ async def handle_download(
                         if fmt == "audio" or platform == "spotify":
                             embed_mp3_metadata(part_path, info or {"title": title, "uploader": artist}, thumb_bytes)
                             with open(part_path, "rb") as f:
-                                await query.message.reply_audio(
-                                    audio=f, title=title, performer=artist, thumbnail=thumb_bytes,
-                                    caption=final_caption(query, part_label),
+                                await send_upload(
+                                    lambda: upload_call(
+                                        f,
+                                        query.message.reply_audio,
+                                        audio=f,
+                                        title=title,
+                                        performer=artist,
+                                        thumbnail=thumb_bytes,
+                                        caption=final_caption(query, part_label),
+                                        **UPLOAD_TIMEOUTS,
+                                    )
                                 )
                         elif platform == "direct" or split_mode == "document":
                             with open(part_path, "rb") as f:
-                                await query.message.reply_document(
-                                    document=f,
-                                    filename=Path(part_path).name,
-                                    caption=final_caption(query, f"📎 {part_label}" if part_label else None),
+                                await send_upload(
+                                    lambda: upload_call(
+                                        f,
+                                        query.message.reply_document,
+                                        document=f,
+                                        filename=Path(part_path).name,
+                                        caption=final_caption(query, f"📎 {part_label}" if part_label else None),
+                                        **UPLOAD_TIMEOUTS,
+                                    )
                                 )
                         else:
                             with open(part_path, "rb") as f:
-                                await query.message.reply_video(
-                                    video=f,
-                                    supports_streaming=True,
-                                    caption=final_caption(query, f"🎬 {part_label}" if part_label else None),
+                                await send_upload(
+                                    lambda: upload_call(
+                                        f,
+                                        query.message.reply_video,
+                                        video=f,
+                                        supports_streaming=True,
+                                        caption=final_caption(query, f"🎬 {part_label}" if part_label else None),
+                                        **UPLOAD_TIMEOUTS,
+                                    )
                                 )
 
                     elapsed = time.time() - start_time
@@ -577,10 +638,15 @@ async def handle_compress_upload(query, url: str, fmt: str, quality: str, platfo
         await safe_edit(query, f"📤 *Uploading compressed video*\n{fmt_size(size_mb)} ⏳")
         try:
             with open(compressed, "rb") as f:
-                await query.message.reply_video(
-                    video=f,
-                    supports_streaming=True,
-                    caption=final_caption(query),
+                await send_upload(
+                    lambda: upload_call(
+                        f,
+                        query.message.reply_video,
+                        video=f,
+                        supports_streaming=True,
+                        caption=final_caption(query),
+                        **UPLOAD_TIMEOUTS,
+                    )
                 )
             try:
                 await query.message.delete()
@@ -1098,6 +1164,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not results:
             await safe_edit(query, "❌ No results found. Try a different query.")
             return
+        keyed_results = []
+        for result in results:
+            result_url = result.get("webpage_url") or result.get("url") or ""
+            if not result_url:
+                continue
+            item = dict(result)
+            item["_cache_key"] = store_url(result_url)
+            keyed_results.append(item)
+        if not keyed_results:
+            await safe_edit(query, "❌ No playable results found. Try a different query.")
+            return
+        results = keyed_results
         context.user_data["search_results"] = results
         lines = [msg_search_results(search_query, platform, len(results))]
         for i, r in enumerate(results[:5], 1):
@@ -1181,9 +1259,10 @@ def main():
     builder = (
         Application.builder()
         .token(BOT_TOKEN)
-        .read_timeout(600)
-        .write_timeout(600)
-        .connect_timeout(60)
+        .read_timeout(UPLOAD_TIMEOUTS["read_timeout"])
+        .write_timeout(UPLOAD_TIMEOUTS["write_timeout"])
+        .connect_timeout(UPLOAD_TIMEOUTS["connect_timeout"])
+        .pool_timeout(UPLOAD_TIMEOUTS["pool_timeout"])
         .post_init(post_init)
     )
     if LOCAL_API_URL:
