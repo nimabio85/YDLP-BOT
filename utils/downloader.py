@@ -612,6 +612,36 @@ def embed_mp3_metadata(filepath: str, info: dict, thumb_bytes: Optional[bytes] =
     except Exception as e:
         logger.warning(f"Metadata embed failed: {e}")
 
+
+def extract_audio_cover(filepath: str) -> bytes | None:
+    """Return embedded cover art bytes from a downloaded audio file, if present."""
+    try:
+        from mutagen import File
+        audio = File(filepath)
+        if not audio or not audio.tags:
+            return None
+
+        tags = audio.tags
+        for key, value in tags.items():
+            key_lower = str(key).lower()
+            if key_lower.startswith("apic"):
+                return getattr(value, "data", None)
+            if key_lower == "covr":
+                covers = value if isinstance(value, list) else [value]
+                for cover in covers:
+                    return bytes(cover)
+            if key_lower in {"metadata_block_picture", "coverart"}:
+                items = value if isinstance(value, list) else [value]
+                for item in items:
+                    data = getattr(item, "data", None)
+                    if data:
+                        return data
+                    if isinstance(item, bytes):
+                        return item
+    except Exception as e:
+        logger.warning(f"Audio cover extraction failed: {e}")
+    return None
+
 def fetch_thumb(url) -> bytes | None:
     if not url:
         return None

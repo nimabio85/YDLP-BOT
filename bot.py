@@ -31,7 +31,7 @@ from utils.downloader import (
     detect_platform, get_info, download_media, download_spotify,
     compress_video, fetch_thumb, embed_mp3_metadata, search_platform,
     download_image, download_direct_file, split_video, split_file, CANCELLED,
-    get_cookie_file,
+    get_cookie_file, extract_audio_cover,
 )
 from utils.formatting import (
     msg_start, msg_help, msg_video_card, msg_progress,
@@ -219,6 +219,12 @@ VIDEO_ONLY_PLATFORMS = set()
 UNSUPPORTED_PLATFORMS = set()
 # Platforms where image posts are common and we should warn
 IMAGE_PLATFORMS = {"instagram", "twitter", "reddit", "tiktok", "facebook"}
+SPOTIFY_COLLECTION_TYPES = {
+    "playlist": "Playlist",
+    "album": "Album",
+    "artist": "Artist",
+    "show": "Show",
+}
 
 def is_allowed(user_id: int) -> bool:
     if is_owner(user_id):
@@ -229,6 +235,13 @@ def is_allowed(user_id: int) -> bool:
 
 def is_owner(user_id: int) -> bool:
     return OWNER_ID != 0 and user_id == OWNER_ID
+
+def spotify_collection_type(url: str) -> Optional[str]:
+    url_lower = url.lower()
+    for path_key, label in SPOTIFY_COLLECTION_TYPES.items():
+        if f"/{path_key}/" in url_lower:
+            return label
+    return None
 
 # ─── Safe message edit ─────────────────────────────────────────────────────────
 
@@ -262,11 +275,12 @@ async def safe_edit(query, text: str, reply_markup=None):
     except BadRequest:
         pass
 
-# ─── Spotify playlist downloader ───────────────────────────────────────────────
+# ─── Spotify collection downloader ─────────────────────────────────────────────
 
 async def handle_spotify_playlist(query, url: str, audio_format: str, audio_quality: str):
+    collection_type = spotify_collection_type(url) or "Playlist"
     await safe_edit(query,
-        f"🎵 *Spotify Playlist*\n\n"
+        f"🎵 *Spotify {collection_type}*\n\n"
         f"Downloading up to *{PLAYLIST_LIMIT} tracks*...\n"
         f"Each track will be sent as it finishes ⏳"
     )
@@ -302,7 +316,7 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
 
         if not files:
             logger.error(f"Playlist stderr: {proc.stderr[:500]}")
-            await safe_edit(query, "❌ *No tracks downloaded.*\n\nspotdl couldn't find matches for this playlist.")
+            await safe_edit(query, f"❌ *No tracks downloaded.*\n\nspotdl couldn't find matches for this Spotify {collection_type.lower()}.")
             record_download(query.from_user.id, "audio", 0, False)
             return
 
@@ -313,6 +327,7 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
             try:
                 await safe_edit(query, f"📤 Uploading track *{i}/{len(files)}*\n`{fpath.stem[:40]}`")
                 sz = fpath.stat().st_size / (1024 * 1024)
+                cover_bytes = extract_audio_cover(str(fpath))
                 with open(fpath, "rb") as f:
                     await send_upload(
                         lambda: upload_call(
@@ -321,6 +336,7 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
                             audio=f,
                             title=fpath.stem,
                             performer="Spotify",
+                            thumbnail=cover_bytes,
                             caption=final_caption(query),
                             **UPLOAD_TIMEOUTS,
                         )
@@ -508,8 +524,8 @@ async def handle_download(
                 record_download(query.from_user.id, fmt, 0, False)
                 return
 
-            # Spotify playlist
-            if platform == "spotify" and "playlist" in url:
+            # Spotify playlists/albums/etc.
+            if platform == "spotify" and spotify_collection_type(url):
                 await handle_spotify_playlist(query, url, audio_format, audio_quality)
                 return
 
@@ -635,7 +651,8 @@ async def handle_download(
                         _last_upload_time[0] = 0.0
                         part_name = Path(part_path).name
                         if fmt == "audio" or platform == "spotify":
-                            embed_mp3_metadata(part_path, info or {"title": title, "uploader": artist}, thumb_bytes)
+                            audio_thumb = thumb_bytes or extract_audio_cover(part_path)
+                            embed_mp3_metadata(part_path, info or {"title": title, "uploader": artist}, audio_thumb)
                             with open(part_path, "rb") as f:
                                 upload_file = make_upload_input(
                                     part_path,
@@ -649,7 +666,7 @@ async def handle_download(
                                         audio=upload_file,
                                         title=title,
                                         performer=artist,
-                                        thumbnail=thumb_bytes,
+                                        thumbnail=audio_thumb,
                                         caption=final_caption(query, part_label),
                                         **UPLOAD_TIMEOUTS,
                                     )
@@ -909,10 +926,10 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Spotify — skip get_info (DRM), go straight to format picker
     if platform == "spotify":
         k = store_url(url)
-        is_playlist = "playlist" in url
-        if is_playlist:
+        collection_type = spotify_collection_type(url)
+        if collection_type:
             await message.reply_text(
-                f"🎵 *Spotify Playlist*\n\n"
+                f"🎵 *Spotify {collection_type}*\n\n"
                 f"Choose audio format (up to {PLAYLIST_LIMIT} tracks will be downloaded) 👇",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=kb_audio_format_picker(k, "spotify"),
