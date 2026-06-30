@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from telegram import Update
+from telegram import InputFile, Update
 from telegram import BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -95,6 +95,44 @@ async def send_upload(send_factory):
 def upload_call(file_obj, method, **kwargs):
     file_obj.seek(0)
     return method(**kwargs)
+
+
+class UploadProgressFile:
+    def __init__(self, file_obj, total_bytes: int, callback):
+        self.file_obj = file_obj
+        self.total_bytes = max(total_bytes, 1)
+        self.callback = callback
+        self.bytes_read = 0
+        self.started_at = time.time()
+        self.name = getattr(file_obj, "name", "upload.bin")
+
+    def read(self, size=-1):
+        chunk = self.file_obj.read(size)
+        if chunk:
+            self.bytes_read += len(chunk)
+            elapsed = max(time.time() - self.started_at, 0.1)
+            self.callback(self.bytes_read, self.total_bytes, self.bytes_read / elapsed)
+        return chunk
+
+    def seek(self, offset, whence=0):
+        pos = self.file_obj.seek(offset, whence)
+        if offset == 0 and whence == 0:
+            self.bytes_read = 0
+            self.started_at = time.time()
+        return pos
+
+    def tell(self):
+        return self.file_obj.tell()
+
+
+def make_upload_input(path: str, file_obj, callback) -> InputFile:
+    total_bytes = Path(path).stat().st_size
+    progress_file = UploadProgressFile(file_obj, total_bytes, callback)
+    return InputFile(
+        progress_file,
+        filename=Path(path).name,
+        read_file_handle=False,
+    )
 
 def new_job_id(user_id: int, url: str) -> str:
     raw = f"{user_id}:{url}:{time.time()}".encode()
@@ -390,6 +428,8 @@ async def handle_download(
 
     # Progress bar throttle
     _last_pct = [0.0]
+    _last_upload_pct = [0.0]
+    _last_upload_time = [0.0]
     loop = asyncio.get_running_loop()
 
     def fmt_bytes(num_bytes: int | float | None) -> str:
@@ -427,6 +467,39 @@ async def handle_download(
             )
         except Exception:
             pass
+
+    async def on_upload_progress(uploaded, total, speed, label="Upload", part_label=None, filename=""):
+        pct = min(uploaded / total * 100, 100)
+        now = time.time()
+        if pct < 100 and pct - _last_upload_pct[0] < 5 and now - _last_upload_time[0] < 2:
+            return
+        _last_upload_pct[0] = pct
+        _last_upload_time[0] = now
+        filled = int(pct / 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        heading = f"📤 *Uploading {part_label}*" if part_label else f"📤 *Uploading {label}*"
+        name_line = f"\n`{filename[:60]}`" if filename else ""
+        await safe_edit(
+            query,
+            f"{heading}{name_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"`[{bar}]` *{pct:.0f}%*\n"
+            f"📊 *{fmt_size(uploaded / (1024 * 1024))} / {fmt_size(total / (1024 * 1024))}*\n"
+            f"⚡ *Speed:* {fmt_size(speed / (1024 * 1024))}/s\n"
+            f"━━━━━━━━━━━━━━━━━━━━",
+            reply_markup=kb_cancel_job(job_id),
+        )
+
+    def make_upload_callback(label="Upload", part_label=None, filename=""):
+        def _callback(uploaded, total, speed):
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    on_upload_progress(uploaded, total, speed, label, part_label, filename),
+                    loop,
+                )
+            except Exception:
+                pass
+        return _callback
 
     try:
         async with sem:
@@ -558,14 +631,22 @@ async def handle_download(
                                 f"`{Path(part_path).name}`",
                             )
 
+                        _last_upload_pct[0] = 0.0
+                        _last_upload_time[0] = 0.0
+                        part_name = Path(part_path).name
                         if fmt == "audio" or platform == "spotify":
                             embed_mp3_metadata(part_path, info or {"title": title, "uploader": artist}, thumb_bytes)
                             with open(part_path, "rb") as f:
+                                upload_file = make_upload_input(
+                                    part_path,
+                                    f,
+                                    make_upload_callback("Audio", part_label, part_name),
+                                )
                                 await send_upload(
                                     lambda: upload_call(
-                                        f,
+                                        upload_file.input_file_content,
                                         query.message.reply_audio,
-                                        audio=f,
+                                        audio=upload_file,
                                         title=title,
                                         performer=artist,
                                         thumbnail=thumb_bytes,
@@ -575,11 +656,16 @@ async def handle_download(
                                 )
                         elif platform == "direct" or split_mode == "document":
                             with open(part_path, "rb") as f:
+                                upload_file = make_upload_input(
+                                    part_path,
+                                    f,
+                                    make_upload_callback("File", part_label, part_name),
+                                )
                                 await send_upload(
                                     lambda: upload_call(
-                                        f,
+                                        upload_file.input_file_content,
                                         query.message.reply_document,
-                                        document=f,
+                                        document=upload_file,
                                         filename=Path(part_path).name,
                                         caption=final_caption(query, f"📎 {part_label}" if part_label else None),
                                         **UPLOAD_TIMEOUTS,
@@ -587,11 +673,16 @@ async def handle_download(
                                 )
                         else:
                             with open(part_path, "rb") as f:
+                                upload_file = make_upload_input(
+                                    part_path,
+                                    f,
+                                    make_upload_callback("Video", part_label, part_name),
+                                )
                                 await send_upload(
                                     lambda: upload_call(
-                                        f,
+                                        upload_file.input_file_content,
                                         query.message.reply_video,
-                                        video=f,
+                                        video=upload_file,
                                         supports_streaming=True,
                                         caption=final_caption(query, f"🎬 {part_label}" if part_label else None),
                                         **UPLOAD_TIMEOUTS,
