@@ -14,6 +14,7 @@ A Telegram bot that downloads videos, audio, image posts, and direct files using
 - **Optional aria2 acceleration** — Direct-file downloads can use `aria2c` when installed
 - **Image posts** — Uses `gallery-dl` for photo/gallery platforms
 - **Search** — YouTube and SoundCloud search from Telegram
+- **Music Finder** — Identify songs using Shazam from voice notes, audio, or video messages, then download them as audio/video with a single tap
 - **History and stats** — User history plus owner-only `/stats`
 - **Queueing** — Limits concurrent downloads
 - **Real cancel button** — Stop active downloads from Telegram

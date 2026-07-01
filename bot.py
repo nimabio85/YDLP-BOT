@@ -46,7 +46,7 @@ from utils.keyboards import (
     kb_format_picker, kb_audio_format_picker, kb_compress,
     kb_search_platform, kb_search_results, kb_spotify_confirm,
     kb_thumbnail_quality, kb_setformat, kb_direct_download,
-    kb_cancel_job, kb_admin_panel, kb_main_menu,
+    kb_cancel_job, kb_admin_panel, kb_main_menu, kb_shazam_result,
 )
 from utils.database import (
     add_history, get_history, record_download, get_stats,
@@ -1096,7 +1096,132 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_shazam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
+        return
+    await update.message.reply_text(
+        "🎙️ *Music Finder (Shazam)*\n\n"
+        "Send or forward a voice note, audio file, video, or video note, and I will try to identify the song for you!",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
+
+    if not is_allowed(update.effective_user.id):
+        await message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    voice = message.voice
+    audio = message.audio
+    video = message.video
+    video_note = message.video_note
+
+    media_obj = voice or audio or video or video_note
+    if not media_obj:
+        return
+
+    status_msg = await message.reply_text("🎙️ *Downloading audio to identify...*", parse_mode=ParseMode.MARKDOWN)
+
+    import tempfile
+    from utils.shazam_finder import extract_audio_snippet, recognize_audio
+
+    with tempfile.TemporaryDirectory(dir=DOWNLOAD_PATH) as tmpdir:
+        try:
+            file_obj = await media_obj.get_file()
+            ext = "ogg"
+            if audio:
+                ext = Path(audio.file_name or "audio.mp3").suffix.lstrip(".") or "mp3"
+            elif video:
+                ext = Path(video.file_name or "video.mp4").suffix.lstrip(".") or "mp4"
+            elif video_note:
+                ext = "mp4"
+
+            input_path = str(Path(tmpdir) / f"input.{ext}")
+            snippet_path = str(Path(tmpdir) / "snippet.wav")
+
+            await status_msg.edit_text("⏳ *Processing audio fingerprint...*", parse_mode=ParseMode.MARKDOWN)
+            await file_obj.download_to_drive(input_path)
+
+            success = await extract_audio_snippet(input_path, snippet_path)
+            if not success or not Path(snippet_path).exists():
+                await status_msg.edit_text("❌ *Failed to extract audio signature.*", parse_mode=ParseMode.MARKDOWN)
+                return
+
+            await status_msg.edit_text("🔍 *Searching Shazam database...*", parse_mode=ParseMode.MARKDOWN)
+            result = await recognize_audio(snippet_path)
+
+            if not result or "track" not in result:
+                await status_msg.edit_text("❌ *Could not identify this music.*\n\nMake sure the song is playing clearly and there is minimal background noise.", parse_mode=ParseMode.MARKDOWN)
+                return
+
+            track = result["track"]
+            title = track.get("title", "Unknown Title")
+            artist = track.get("subtitle", "Unknown Artist")
+            shazam_url = track.get("url")
+
+            album = None
+            genres = None
+            sections = track.get("sections", [])
+            for section in sections:
+                if section.get("type") == "SONG":
+                    metadata = section.get("metadata", [])
+                    for item in metadata:
+                        if item.get("title") == "Album":
+                            album = item.get("text")
+                elif section.get("type") == "GENRE":
+                    genres = section.get("name")
+
+            cover_art_url = None
+            images = track.get("images")
+            if images:
+                cover_art_url = images.get("coverarthq") or images.get("coverart")
+
+            search_query = f"{artist} - {title}"
+            k = store_url(f"shazam:{search_query}")
+
+            caption = (
+                f"🎵 *Song Found!*\n\n"
+                f"📌 *Title:* {escape_markdown(title)}\n"
+                f"👤 *Artist:* {escape_markdown(artist)}\n"
+            )
+            if album:
+                caption += f"💿 *Album:* {escape_markdown(album)}\n"
+            if genres:
+                caption += f"🏷️ *Genre:* {escape_markdown(genres)}\n"
+
+            reply_markup = kb_shazam_result(k, shazam_url)
+
+            sent_photo = False
+            if cover_art_url:
+                thumb_bytes = fetch_thumb(cover_art_url)
+                if thumb_bytes:
+                    try:
+                        await message.reply_photo(
+                            photo=thumb_bytes,
+                            caption=caption,
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=reply_markup
+                        )
+                        sent_photo = True
+                        await status_msg.delete()
+                    except Exception as e:
+                        logger.warning(f"Failed to send cover art: {e}")
+
+            if not sent_photo:
+                await status_msg.edit_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+
+        except Exception as e:
+            logger.error(f"Error in handle_media_message: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ *An error occurred during music identification:* {escape_markdown(str(e))}", parse_mode=ParseMode.MARKDOWN)
+
+
 # ─── URL message handler ───────────────────────────────────────────────────────
+
 
 async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -1360,6 +1485,70 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+    # Shazam download / search options
+    if data.startswith("shazamdl|"):
+        _, action, k = data.split("|", 2)
+        shazam_query = resolve_url(k)
+        if not shazam_query or not shazam_query.startswith("shazam:"):
+            await safe_edit(query, "❌ Session expired. Try searching manually.")
+            return
+
+        search_query = shazam_query[len("shazam:"):]
+
+        if action == "search":
+            context.user_data["search_query"] = search_query
+            search_query_esc = escape_markdown(search_query)
+            await safe_edit(query, f"🔍 Searching *YouTube* for:\n`{search_query_esc}`...")
+            results = await search_platform(search_query, "youtube")
+            if not results:
+                await safe_edit(query, "❌ No results found. Try a different query.")
+                return
+            keyed_results = []
+            for result in results:
+                result_url = result.get("webpage_url") or result.get("url") or ""
+                if not result_url:
+                    continue
+                item = dict(result)
+                item["_cache_key"] = store_url(result_url)
+                keyed_results.append(item)
+            if not keyed_results:
+                await safe_edit(query, "❌ No playable results found.")
+                return
+            results = keyed_results
+            context.user_data["search_results"] = results
+            lines = [msg_search_results(search_query, "youtube", len(results))]
+            for i, r in enumerate(results[:5], 1):
+                title = r.get("title") or r.get("name") or "Unknown"
+                uploader = r.get("uploader") or r.get("channel") or ""
+                duration = fmt_duration(r.get("duration") or 0)
+                lines.append(msg_search_result_item(i, title, uploader, duration))
+            await safe_edit(query, "\n\n".join(lines), reply_markup=kb_search_results(results, "youtube"))
+            return
+
+        # Automatically download the first YouTube search result
+        await safe_edit(query, f"⚡ *Searching for download link...*\n`{escape_markdown(search_query)}`")
+        results = await search_platform(search_query, "youtube")
+        if not results or not (results[0].get("webpage_url") or results[0].get("url")):
+            await safe_edit(query, "❌ Could not find a downloadable match on YouTube.")
+            return
+
+        best_match_url = results[0].get("webpage_url") or results[0].get("url")
+        platform = detect_platform(best_match_url)
+        nk = store_url(best_match_url)
+
+        if action == "audio":
+            audio_fmt = get_pref(query.from_user.id, "audio_format", "mp3")
+            audio_quality = get_pref(query.from_user.id, "audio_quality", "192")
+            await handle_download(query, best_match_url, "audio", "audio", platform, audio_fmt, audio_quality)
+        else:  # video
+            default_fmt = get_pref(query.from_user.id, "default_format", "ask")
+            if default_fmt in ("audio", "ask"):
+                quality = "best"
+            else:
+                quality = default_fmt
+            await handle_download(query, best_match_url, "video", quality, platform)
+        return
+
     # Set format preference
     if data.startswith("setfmt|"):
         fmt = data.split("|", 1)[1]
@@ -1602,6 +1791,7 @@ def main():
             BotCommand("menu", "Open the main menu"),
             BotCommand("help", "Show help"),
             BotCommand("search", "Search media"),
+            BotCommand("shazam", "Identify music using Shazam"),
             BotCommand("sites", "Show supported sites"),
             BotCommand("thumbnail", "Get a YouTube thumbnail"),
             BotCommand("history", "Show download history"),
@@ -1647,7 +1837,10 @@ def main():
     app.add_handler(CommandHandler("setformat", cmd_setformat))
     app.add_handler(CommandHandler("thumbnail", cmd_thumbnail))
     app.add_handler(CommandHandler("search", cmd_search))
+    app.add_handler(CommandHandler("shazam", cmd_shazam))
+    app.add_handler(CommandHandler("findmusic", cmd_shazam))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_message))
+    app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE) & ~filters.COMMAND, handle_media_message))
     app.add_handler(MessageHandler(~filters.COMMAND, handle_unknown_message))
     app.add_handler(CallbackQueryHandler(callback_handler))
 

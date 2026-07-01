@@ -159,3 +159,21 @@ def kb_setformat() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📺 Always 1080p",  callback_data="setfmt|1080"),
         ],
     ])
+
+
+def kb_shazam_result(k: str, shazam_url: str | None = None) -> InlineKeyboardMarkup:
+    rows = []
+    # Row 1: Fast download buttons
+    rows.append([
+        InlineKeyboardButton("🎵 Download Audio", callback_data=f"shazamdl|audio|{k}"),
+        InlineKeyboardButton("🎬 Download Video", callback_data=f"shazamdl|video|{k}"),
+    ])
+    # Row 2: Search or Link
+    row2 = []
+    if shazam_url:
+        row2.append(InlineKeyboardButton("🔗 Shazam Link", url=shazam_url))
+    row2.append(InlineKeyboardButton("🔍 Search manually", callback_data=f"shazamdl|search|{k}"))
+    rows.append(row2)
+    # Row 3: Dismiss
+    rows.append([InlineKeyboardButton("❌ Dismiss", callback_data="cancel")])
+    return InlineKeyboardMarkup(rows)
