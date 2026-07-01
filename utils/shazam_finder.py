@@ -71,3 +71,40 @@ async def recognize_audio(file_path: str) -> dict | None:
     except Exception as e:
         logger.error(f"Shazam recognition error: {e}")
         return None
+
+
+async def download_url_snippet(url: str, out_dir: str) -> str | None:
+    """
+    Download a 12-second audio snippet of the URL using yt-dlp.
+    Returns the path to the downloaded snippet file.
+    """
+    import yt_dlp
+    from yt_dlp.utils import download_range_func
+    from utils.downloader import ydl_base_opts
+    
+    opts = ydl_base_opts({
+        "format": "bestaudio/best",
+        "outtmpl": f"{out_dir}/snippet.%(ext)s",
+        "download_ranges": download_range_func(None, [(2, 14)]),
+        "force_keyframes_at_cuts": True,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "wav",
+        }],
+    }, url=url)
+    
+    try:
+        loop = asyncio.get_event_loop()
+        def _download():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.extract_info(url, download=True)
+                return str(Path(out_dir) / "snippet.wav")
+                
+        filepath = await loop.run_in_executor(None, _download)
+        if filepath and Path(filepath).exists():
+            return filepath
+        return None
+    except Exception as e:
+        logger.error(f"Error downloading URL audio snippet: {e}")
+        return None
+

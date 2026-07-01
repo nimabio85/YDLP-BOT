@@ -23,7 +23,7 @@ def kb_format_picker(k: str, platform: str = "youtube") -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📋 Info",       callback_data=f"info|{k}"),
-            InlineKeyboardButton("🖼 Thumbnail",  callback_data=f"thumb|{k}"),
+            InlineKeyboardButton("🎙️ Find Music",  callback_data=f"shazamurl|{k}"),
         ],
     ]
     return InlineKeyboardMarkup(rows)

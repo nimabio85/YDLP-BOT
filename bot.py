@@ -1485,6 +1485,100 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+    # Shazam URL identify option
+    if data.startswith("shazamurl|"):
+        k = data.split("|", 1)[1]
+        url = resolve_url(k)
+        if not url:
+            await safe_edit(query, "❌ Session expired. Send the link again.")
+            return
+
+        # Show status
+        await safe_edit(query, "🎙️ *Extracting audio snippet from link...*", reply_markup=None)
+
+        import tempfile
+        from utils.shazam_finder import download_url_snippet, recognize_audio
+
+        with tempfile.TemporaryDirectory(dir=DOWNLOAD_PATH) as tmpdir:
+            try:
+                # Download 12s wav snippet
+                snippet_path = await download_url_snippet(url, tmpdir)
+                if not snippet_path or not Path(snippet_path).exists():
+                    await safe_edit(query, "❌ *Failed to extract audio from this link.*")
+                    return
+
+                # Query Shazam
+                await safe_edit(query, "🔍 *Searching Shazam database...*")
+                result = await recognize_audio(snippet_path)
+
+                if not result or "track" not in result:
+                    await safe_edit(query, "❌ *Could not identify this music.*\n\nShazam couldn't find any matching songs in the video's audio.")
+                    return
+
+                # Found! Parse track details
+                track = result["track"]
+                title = track.get("title", "Unknown Title")
+                artist = track.get("subtitle", "Unknown Artist")
+                shazam_url = track.get("url")
+
+                album = None
+                genres = None
+                sections = track.get("sections", [])
+                for section in sections:
+                    if section.get("type") == "SONG":
+                        metadata = section.get("metadata", [])
+                        for item in metadata:
+                            if item.get("title") == "Album":
+                                album = item.get("text")
+                    elif section.get("type") == "GENRE":
+                        genres = section.get("name")
+
+                cover_art_url = None
+                images = track.get("images")
+                if images:
+                    cover_art_url = images.get("coverarthq") or images.get("coverart")
+
+                # Save query for download buttons
+                search_query = f"{artist} - {title}"
+                nk = store_url(f"shazam:{search_query}")
+
+                caption = (
+                    f"🎵 *Song Found!*\n\n"
+                    f"📌 *Title:* {escape_markdown(title)}\n"
+                    f"👤 *Artist:* {escape_markdown(artist)}\n"
+                )
+                if album:
+                    caption += f"💿 *Album:* {escape_markdown(album)}\n"
+                if genres:
+                    caption += f"🏷️ *Genre:* {escape_markdown(genres)}\n"
+
+                reply_markup = kb_shazam_result(nk, shazam_url)
+
+                sent_photo = False
+                if cover_art_url:
+                    thumb_bytes = fetch_thumb(cover_art_url)
+                    if thumb_bytes:
+                        try:
+                            # Send as new photo message and delete old downloader card
+                            await query.message.reply_photo(
+                                photo=thumb_bytes,
+                                caption=caption,
+                                parse_mode=ParseMode.MARKDOWN,
+                                reply_markup=reply_markup
+                            )
+                            sent_photo = True
+                            await query.message.delete()
+                        except Exception as e:
+                            logger.warning(f"Failed to send cover art: {e}")
+
+                if not sent_photo:
+                    await safe_edit(query, caption, reply_markup=reply_markup)
+
+            except Exception as e:
+                logger.error(f"Error in shazamurl callback: {e}", exc_info=True)
+                await safe_edit(query, f"❌ *An error occurred:* {escape_markdown(str(e))}")
+        return
+
     # Shazam download / search options
     if data.startswith("shazamdl|"):
         _, action, k = data.split("|", 2)
