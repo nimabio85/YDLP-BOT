@@ -1,55 +1,47 @@
 # ytdl-bot
 
-A Telegram bot that downloads videos, audio, image posts, and direct files
-from dozens of platforms using [yt-dlp](https://github.com/yt-dlp/yt-dlp),
-[gallery-dl](https://github.com/mikf/gallery-dl),
-[spotdl](https://github.com/spotDL/spotify-downloader), and
-[Shazam](https://www.shazam.com/).
+_A Telegram bot that downloads video, audio, and gallery posts from dozens of platforms._
 
-Send a link, pick a format, and the bot delivers the file straight to your
-chat.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python: 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB.svg)](https://www.python.org/)
+[![Telegram Bot](https://img.shields.io/badge/Telegram-Bot-26A5E4.svg)](https://core.telegram.org/bots)
 
 ---
 
-## Features
+## ✨ Overview
+
+ytdl-bot downloads videos, audio, image posts, and direct files from dozens of platforms using [yt-dlp](https://github.com/yt-dlp/yt-dlp), [gallery-dl](https://github.com/mikf/gallery-dl), [spotdl](https://github.com/spotDL/spotify-downloader), and [Shazam](https://www.shazam.com/). Send a link, pick a format, and the bot delivers the file straight to your chat.
+
+- **No re-encoding by default** — files are pulled at requested quality, not transcoded unless splitting/compression is needed.
+- **No external database** — history, stats, prefs, and cache are all local JSON.
+- **No duplicate polling** — a process lock prevents two instances from fighting over the same bot token.
+
+## 🚀 Features
 
 - **Video downloads** — Best, 4K, 1080p, 720p, 480p
 - **Audio extraction** — MP3, M4A, FLAC, WAV with embedded metadata and cover art
-- **Music identification** — Recognize songs from voice notes, audio, or video
-  messages via Shazam, then download them in one tap
-- **Multi-platform support** — YouTube, Instagram, TikTok, Reddit, Twitter/X,
-  Facebook, Twitch, SoundCloud, Spotify, PixelDrain, KrakenFiles, Google Drive,
-  and most other yt-dlp-supported sites
-- **Direct file downloads** — Unknown or direct URLs are downloaded as files,
-  with optional `aria2c` acceleration
+- **Music identification** — Recognize songs from voice notes, audio, or video messages via Shazam, then download them in one tap
+- **Multi-platform support** — YouTube, Instagram, TikTok, Reddit, Twitter/X, Facebook, Twitch, SoundCloud, Spotify, PixelDrain, KrakenFiles, Google Drive, and most other yt-dlp-supported sites
+- **Direct file downloads** — Unknown or direct URLs are downloaded as files, with optional `aria2c` acceleration
 - **Image and gallery posts** — Uses `gallery-dl` for photo/gallery platforms
 - **Search** — Search YouTube and SoundCloud directly from Telegram
-- **Automatic file splitting** — Oversized videos and files are split into
-  uploadable parts
-- **Download caching** — Repeated requests for the same media are served
-  instantly from a configurable file-id cache
-- **Queueing and cancellation** — Concurrency limits with a real cancel button
-  for active downloads
+- **Automatic file splitting** — Oversized videos and files are split into uploadable parts
+- **Download caching** — Repeated requests for the same media are served instantly from a configurable file-id cache
+- **Queueing and cancellation** — Concurrency limits with a real cancel button for active downloads
 - **Admin controls** — Owner panel, block/unblock users, broadcast, and stats
 - **Access control** — Optional user whitelist and per-user blocking
-- **Process lock** — Prevents duplicate bot instances from polling the same token
-- **Local Bot API support** — Optional 2 GB uploads when using a local Telegram
-  Bot API server
+- **Local Bot API support** — Optional 2 GB uploads when using a local Telegram Bot API server
 
----
+## 📋 Requirements
 
-## Prerequisites
+- [Python 3.12+](https://www.python.org/)
+- [ffmpeg](https://ffmpeg.org/) — required for stream merging, audio extraction, and splitting
+- [aria2](https://aria2.github.io/) *(optional)* — speeds up direct-file downloads
+- A Telegram bot token from [@BotFather](https://t.me/botfather)
 
-- **Python 3.12+**
-- **ffmpeg** — required for stream merging, audio extraction, and splitting
-- **aria2** *(optional)* — speeds up direct-file downloads
-- **A Telegram bot token** from [@BotFather](https://t.me/botfather)
+> The Docker image already includes ffmpeg and aria2.
 
-The Docker image already includes ffmpeg and aria2.
-
----
-
-## Quick Start
+## 📦 Installation
 
 ### Option A — Docker (recommended)
 
@@ -91,11 +83,7 @@ sudo systemctl enable --now ytdl-bot
 sudo systemctl status ytdl-bot
 ```
 
-View logs:
-
-```bash
-journalctl -u ytdl-bot -f
-```
+> View logs with `journalctl -u ytdl-bot -f`.
 
 ### Option C — Local development
 
@@ -107,40 +95,36 @@ pip install -r requirements.txt
 python bot.py
 ```
 
----
+## 🎛 Configuration
 
-## Configuration
+All settings live in `.env`. Copy `.env.example` to get started — no UI panel is included, so every option below is set via environment variables.
 
-All settings live in `.env`. Copy `.env.example` to get started.
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `BOT_TOKEN` | string | — (required) | Bot token from @BotFather |
+| `OWNER_ID` | int | `0` | Telegram user ID with admin access (`/stats`, `/admin`, etc.) |
+| `ALLOWED_USERS` | string | *(all)* | Comma-separated Telegram user IDs to whitelist |
+| `LOCAL_API_URL` | string | *(blank)* | Local Telegram Bot API URL for larger uploads |
+| `MAX_FILE_SIZE_MB` | int | `50` *(2000 with local API)* | Maximum upload size in MB |
+| `COMPRESS_THRESHOLD_MB` | int | `MAX_FILE_SIZE_MB` | Size above which compression is offered |
+| `DOWNLOAD_PATH` | string | `/tmp/ytdl-bot` | Temporary directory for downloads |
+| `DATA_PATH` | string | `data` | Directory for history, stats, prefs, and cache |
+| `COOKIES_FILE` | string | *(blank)* | Fallback Netscape cookies file |
+| `YOUTUBE_COOKIES_FILE` | string | *(blank)* | Site-specific cookies file |
+| `INSTAGRAM_COOKIES_FILE` | string | *(blank)* | Site-specific cookies file |
+| `TIKTOK_COOKIES_FILE` | string | *(blank)* | Site-specific cookies file |
+| `SPOTIFY_COOKIES_FILE` | string | *(blank)* | Site-specific cookies file |
+| `TWITTER_COOKIES_FILE` | string | *(blank)* | Site-specific cookies file |
+| `FACEBOOK_COOKIES_FILE` | string | *(blank)* | Site-specific cookies file |
+| `MAX_CONCURRENT_DOWNLOADS` | int | `2` | Number of simultaneous downloads |
+| `MAX_DURATION_SECONDS` | int | `10800` | Reject videos longer than this many seconds |
+| `CACHE_TTL_DAYS` | int | `60` | How long cached file IDs remain valid |
+| `CACHE_MAX_ENTRIES` | int | `1000` | Maximum number of cached downloads |
+| `ENABLE_ARIA2` | bool | `false` | Use `aria2c` for faster direct downloads |
+| `SPOTIFY_CLIENT_ID` | string | *(blank)* | Spotify API client ID |
+| `SPOTIFY_CLIENT_SECRET` | string | *(blank)* | Spotify API client secret |
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `BOT_TOKEN` | Yes | — | Bot token from @BotFather |
-| `OWNER_ID` | No | `0` | Telegram user ID with admin access (`/stats`, `/admin`, etc.) |
-| `ALLOWED_USERS` | No | *(all)* | Comma-separated Telegram user IDs to whitelist |
-| `LOCAL_API_URL` | No | *(blank)* | Local Telegram Bot API URL for larger uploads |
-| `MAX_FILE_SIZE_MB` | No | `50` *(2000 with local API)* | Maximum upload size in MB |
-| `COMPRESS_THRESHOLD_MB` | No | `MAX_FILE_SIZE_MB` | Size above which compression is offered |
-| `DOWNLOAD_PATH` | No | `/tmp/ytdl-bot` | Temporary directory for downloads |
-| `DATA_PATH` | No | `data` | Directory for history, stats, prefs, and cache |
-| `COOKIES_FILE` | No | *(blank)* | Fallback Netscape cookies file |
-| `YOUTUBE_COOKIES_FILE` | No | *(blank)* | Site-specific cookies file |
-| `INSTAGRAM_COOKIES_FILE` | No | *(blank)* | Site-specific cookies file |
-| `TIKTOK_COOKIES_FILE` | No | *(blank)* | Site-specific cookies file |
-| `SPOTIFY_COOKIES_FILE` | No | *(blank)* | Site-specific cookies file |
-| `TWITTER_COOKIES_FILE` | No | *(blank)* | Site-specific cookies file |
-| `FACEBOOK_COOKIES_FILE` | No | *(blank)* | Site-specific cookies file |
-| `MAX_CONCURRENT_DOWNLOADS` | No | `2` | Number of simultaneous downloads |
-| `MAX_DURATION_SECONDS` | No | `10800` | Reject videos longer than this many seconds |
-| `CACHE_TTL_DAYS` | No | `60` | How long cached file IDs remain valid |
-| `CACHE_MAX_ENTRIES` | No | `1000` | Maximum number of cached downloads |
-| `ENABLE_ARIA2` | No | `false` | Use `aria2c` for faster direct downloads |
-| `SPOTIFY_CLIENT_ID` | No | *(blank)* | Spotify API client ID |
-| `SPOTIFY_CLIENT_SECRET` | No | *(blank)* | Spotify API client secret |
-
----
-
-## Usage
+## 📖 Usage
 
 1. Start a chat with your bot and run `/start`.
 2. Paste a supported media URL or a direct file URL.
@@ -150,7 +134,7 @@ All settings live in `.env`. Copy `.env.example` to get started.
 ### Commands
 
 | Command | Description |
-|---|---|
+| --- | --- |
 | `/start` | Start the bot and view the welcome message |
 | `/menu` | Open the main menu |
 | `/help` | Show help |
@@ -167,9 +151,7 @@ All settings live in `.env`. Copy `.env.example` to get started.
 | `/unblock <user_id>` | Unblock a user (owner only) |
 | `/blocked` | List blocked users (owner only) |
 
----
-
-## Supported Sites
+### Supported Sites
 
 - YouTube / YouTube Shorts
 - Instagram (posts, reels, stories)
@@ -184,19 +166,16 @@ All settings live in `.env`. Copy `.env.example` to get started.
 - Direct files: MP4, MKV, MP3, ZIP, PDF, APK, and more
 - Any other site supported by yt-dlp
 
----
+## 🔑 Cookies for Login-Gated Content
 
-## Cookies
-
-Some platforms block bots or require login. Use a **Netscape-format
-`cookies.txt`** exported from a browser session that can access the content.
+Some platforms block bots or require login. Use a **Netscape-format `cookies.txt`** exported from a browser session that can access the content.
 
 Common use cases:
 
-- **instagram.com** — private/login-gated posts, reels, stories, rate limits
-- **tiktok.com** — bot checks, region/login-gated videos
-- **youtube.com** — age checks, member/private/unlisted content
-- **spotify.com** / **youtube.com** — helps spotdl find matches more reliably
+1. **instagram.com** — private/login-gated posts, reels, stories, rate limits
+2. **tiktok.com** — bot checks, region/login-gated videos
+3. **youtube.com** — age checks, member/private/unlisted content
+4. **spotify.com** / **youtube.com** — helps spotdl find matches more reliably
 
 Place exported files in the `cookies/` folder and reference them in `.env`:
 
@@ -207,60 +186,55 @@ TIKTOK_COOKIES_FILE=cookies/tiktok.txt
 SPOTIFY_COOKIES_FILE=cookies/spotify.txt
 ```
 
-A single fallback file can be set with `COOKIES_FILE=cookies.txt`, but
-separate per-site files are easier to manage.
+A single fallback file can be set with `COOKIES_FILE=cookies.txt`, but separate per-site files are easier to manage.
 
 > Keep cookies private. They can grant access to your logged-in accounts.
 
----
+## 📡 Local Bot API Server (2 GB Uploads)
 
-## Local Bot API Server (2 GB uploads)
+By default, Telegram limits bot uploads to 50 MB. Running a local Bot API server raises this to 2 GB. The included `install-local-api.sh` script builds and installs the official server on a VPS.
 
-By default, Telegram limits bot uploads to 50 MB. Running a local Bot API
-server raises this to 2 GB. The included `install-local-api.sh` script builds
-and installs the official server on a VPS.
+1. Get an `API_ID` and `API_HASH` from <https://my.telegram.org/apps>.
+2. Run the installer:
 
-You will need an `API_ID` and `API_HASH` from <https://my.telegram.org/apps>.
+   ```bash
+   sudo bash install-local-api.sh
+   ```
 
-```bash
-sudo bash install-local-api.sh
-```
+3. Add to `.env`:
 
-Then add to `.env`:
+   ```env
+   LOCAL_API_URL=http://localhost:8081
+   MAX_FILE_SIZE_MB=2000
+   ```
 
-```env
-LOCAL_API_URL=http://localhost:8081
-MAX_FILE_SIZE_MB=2000
-```
+4. Restart the bot.
 
-Restart the bot afterward.
+## 🖼 Preview
 
----
+<!-- Add a screenshot or GIF here, e.g. -->
+<!-- ![ytdl-bot in action](docs/preview.png) -->
 
-## Updating yt-dlp
+_Feel free to add a screenshot of the bot's inline format picker and download flow._
 
-yt-dlp is updated frequently to keep up with site changes. Update it regularly.
+## 🛠 Troubleshooting
 
-**Docker:**
+There's no built-in diagnostics command — check logs first (`docker compose logs -f` or `journalctl -u ytdl-bot -f`).
 
-```bash
-docker compose build --no-cache
-docker compose up -d
-```
+| Problem | Solution |
+| --- | --- |
+| Download fails with "Sign in to confirm you're not a bot" | Add a site-specific cookies file (see [Cookies](#-cookies-for-login-gated-content)) |
+| Upload fails for large files | Set up a [local Bot API server](#-local-bot-api-server-2-gb-uploads) or lower `MAX_FILE_SIZE_MB` |
+| Audio has no cover art / metadata | Confirm ffmpeg is installed and on `PATH` |
+| Spotify tracks won't match | Set `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` and add a Spotify cookies file |
+| Bot doesn't respond, no errors | Check for a second running instance — the process lock silently blocks duplicate pollers |
+| Site suddenly stops working | Run `pip install -U yt-dlp` (see [Updating yt-dlp](#-updating-yt-dlp)) |
 
-**Bare VPS:**
+## 💻 Development
 
-```bash
-source /root/apps/YDLP-BOT/venv/bin/activate
-pip install -U yt-dlp
-sudo systemctl restart ytdl-bot
-```
+### Project structure
 
----
-
-## Project Structure
-
-```
+```text
 .
 ├── bot.py                 # Entry point: handlers, callbacks, main loop
 ├── config.py              # Loads and validates environment configuration
@@ -280,22 +254,40 @@ sudo systemctl restart ytdl-bot
     └── url_store.py       # Short key to URL mapping for callbacks
 ```
 
----
+### Updating yt-dlp
 
-## Notes
+yt-dlp is updated frequently to keep up with site changes. Update it regularly.
 
-- Telegram bots can send files up to **50 MB** on the public Bot API. Use
-  `MAX_FILE_SIZE_MB=50` unless you run a local Bot API server.
-- ffmpeg is **required** — yt-dlp uses it to merge video and audio streams,
-  extract audio, and split large files.
-- aria2 is optional. Enable it with `ENABLE_ARIA2=true` after installing
-  `aria2c` for faster direct-file downloads.
-- Rebuild Docker or run `pip install -U yt-dlp` periodically to keep up with
-  YouTube and other site changes.
+**Docker:**
 
----
+```bash
+docker compose build --no-cache
+docker compose up -d
+```
 
-## License
+**Bare VPS:**
 
-Licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file
-for details.
+```bash
+source /root/apps/YDLP-BOT/venv/bin/activate
+pip install -U yt-dlp
+sudo systemctl restart ytdl-bot
+```
+
+### How it works
+
+- `bot.py` wires up Telegram handlers/callbacks and runs the main polling loop.
+- `config.py` loads and validates all `.env` variables on startup.
+- `utils/downloader.py` dispatches each URL to yt-dlp, gallery-dl, spotdl, or a raw HTTP/aria2c download based on the platform.
+- `utils/database.py` persists history, stats, prefs, and the file-id cache as JSON under `DATA_PATH`.
+- A process lock prevents two bot instances from polling the same token simultaneously.
+
+## 📄 License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+## 🙏 Acknowledgements
+
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- [gallery-dl](https://github.com/mikf/gallery-dl) by mikf
+- [spotdl](https://github.com/spotDL/spotify-downloader)
+- [Shazam](https://www.shazam.com/)
