@@ -1,0 +1,38 @@
+# Version control
+.git
+.gitignore
+
+# Python caches and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+.python-version
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+.env.save
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Backups
+*.bak
+
+# Logs
+*.log
+
+# Build context that should not leak into the image
+.agents/
+data/
+cookies/
+!cookies/.gitkeep
