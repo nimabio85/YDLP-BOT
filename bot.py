@@ -74,6 +74,18 @@ def store_url(url: str) -> str:
 def resolve_url(key: str) -> Optional[str]:
     return _URL_CACHE.get(key)
 
+
+class AdaptedQuery:
+    def __init__(self, message):
+        self.message = message
+        self.from_user = message.from_user
+
+    async def edit_message_caption(self, caption, **kwargs):
+        return await self.message.edit_caption(caption=caption, **kwargs)
+
+    async def edit_message_text(self, text, **kwargs):
+        return await self.message.edit_text(text=text, **kwargs)
+
 def build_final_caption(
     username: str,
     label: str | None = None,
@@ -1250,6 +1262,24 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await message.chat.send_action(ChatAction.TYPING)
 
+    # Detect short videos (YouTube Shorts, TikTok, Instagram Reels) to download them automatically in best quality
+    is_short_video = False
+    if platform == "tiktok":
+        is_short_video = True
+    elif platform == "youtube" and "/shorts/" in url.lower():
+        is_short_video = True
+    elif platform == "instagram" and ("/reel/" in url.lower() or "/reels/" in url.lower()):
+        is_short_video = True
+
+    if is_short_video:
+        status_msg = await message.reply_text(
+            f"⚡ *Processing {platform.title()}...*",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        adapted = AdaptedQuery(status_msg)
+        await handle_download(adapted, url, "video", "best", platform)
+        return
+
     # Spotify — skip get_info (DRM), go straight to format picker
     if platform == "spotify":
         k = store_url(url)
@@ -1666,12 +1696,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tags = escape_markdown(", ".join((info.get("tags") or [])[:8]) or "none")
         title_esc = escape_markdown(info.get('title', 'Unknown')[:60])
         uploader_esc = escape_markdown(info.get('uploader') or info.get('channel') or "Unknown")
+        view_count = info.get('view_count')
+        like_count = info.get('like_count')
+        view_count_str = f"{view_count:,}" if isinstance(view_count, (int, float)) else "Unknown"
+        like_count_str = f"{like_count:,}" if isinstance(like_count, (int, float)) else "Unknown"
+
         text = (
             f"📊 *Video Info*\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📄 *{title_esc}*\n"
             f"👤 {uploader_esc}\n"
-            f"👁 {info.get('view_count', 0):,}  •  👍 {info.get('like_count', 0):,}\n"
+            f"👁 {view_count_str}  •  👍 {like_count_str}\n"
             f"⏱ {fmt_duration(info.get('duration', 0))}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🏷 {tags}\n\n"
@@ -1917,26 +1952,26 @@ def main():
         logger.info(f"🚀 Local Bot API: {LOCAL_API_URL}")
 
     app = builder.build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("menu", cmd_menu))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("sites", cmd_sites))
-    app.add_handler(CommandHandler("history", cmd_history))
-    app.add_handler(CommandHandler("stats", cmd_stats))
-    app.add_handler(CommandHandler("admin", cmd_admin))
-    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
-    app.add_handler(CommandHandler("block", cmd_block))
-    app.add_handler(CommandHandler("unblock", cmd_unblock))
-    app.add_handler(CommandHandler("blocked", cmd_blocked))
-    app.add_handler(CommandHandler("setformat", cmd_setformat))
-    app.add_handler(CommandHandler("thumbnail", cmd_thumbnail))
-    app.add_handler(CommandHandler("search", cmd_search))
-    app.add_handler(CommandHandler("shazam", cmd_shazam))
-    app.add_handler(CommandHandler("findmusic", cmd_shazam))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_message))
-    app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE) & ~filters.COMMAND, handle_media_message))
-    app.add_handler(MessageHandler(~filters.COMMAND, handle_unknown_message))
-    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(CommandHandler("start", cmd_start, block=False))
+    app.add_handler(CommandHandler("menu", cmd_menu, block=False))
+    app.add_handler(CommandHandler("help", cmd_help, block=False))
+    app.add_handler(CommandHandler("sites", cmd_sites, block=False))
+    app.add_handler(CommandHandler("history", cmd_history, block=False))
+    app.add_handler(CommandHandler("stats", cmd_stats, block=False))
+    app.add_handler(CommandHandler("admin", cmd_admin, block=False))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast, block=False))
+    app.add_handler(CommandHandler("block", cmd_block, block=False))
+    app.add_handler(CommandHandler("unblock", cmd_unblock, block=False))
+    app.add_handler(CommandHandler("blocked", cmd_blocked, block=False))
+    app.add_handler(CommandHandler("setformat", cmd_setformat, block=False))
+    app.add_handler(CommandHandler("thumbnail", cmd_thumbnail, block=False))
+    app.add_handler(CommandHandler("search", cmd_search, block=False))
+    app.add_handler(CommandHandler("shazam", cmd_shazam, block=False))
+    app.add_handler(CommandHandler("findmusic", cmd_shazam, block=False))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url_message, block=False))
+    app.add_handler(MessageHandler((filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE) & ~filters.COMMAND, handle_media_message, block=False))
+    app.add_handler(MessageHandler(~filters.COMMAND, handle_unknown_message, block=False))
+    app.add_handler(CallbackQueryHandler(callback_handler, block=False))
 
     logger.info("✅ Bot started.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
