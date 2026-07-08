@@ -187,3 +187,12 @@ def kb_short_video_download(job_id: str, k: str) -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton("❌ Cancel download", callback_data=f"canceljob|{job_id}")],
     ])
+
+
+def kb_video_finished(k: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📋 Info",       callback_data=f"info|{k}"),
+            InlineKeyboardButton("🎙️ Find Music",  callback_data=f"shazamurl|{k}"),
+        ]
+    ])

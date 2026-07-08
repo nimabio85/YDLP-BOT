@@ -47,7 +47,7 @@ from utils.keyboards import (
     kb_search_platform, kb_search_results, kb_spotify_confirm,
     kb_thumbnail_quality, kb_setformat, kb_direct_download,
     kb_cancel_job, kb_admin_panel, kb_main_menu, kb_shazam_result,
-    kb_short_video_download,
+    kb_short_video_download, kb_video_finished,
 )
 from utils.database import (
     add_history, get_history, record_download, get_stats,
@@ -185,6 +185,19 @@ def make_download_cache_key(
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def is_short_video_link(platform: str, url: str) -> bool:
+    if not url:
+        return False
+    url_lower = url.lower()
+    if platform == "tiktok":
+        return True
+    if platform == "youtube" and "/shorts/" in url_lower:
+        return True
+    if platform == "instagram" and ("/reel/" in url_lower or "/reels/" in url_lower):
+        return True
+    return False
+
+
 async def send_cached_download(query, cache_key: str, cached: dict) -> bool:
     media_type = cached.get("media_type")
     file_ids = cached.get("file_ids") or []
@@ -219,10 +232,18 @@ async def send_cached_download(query, cache_key: str, cached: dict) -> bool:
                     **UPLOAD_TIMEOUTS,
                 )
             else:
+                platform = cached.get("platform") or ""
+                video_url = cached.get("url") or ""
+                video_markup = None
+                if video_url and is_short_video_link(platform, video_url):
+                    k_url = store_url(video_url)
+                    video_markup = kb_video_finished(k_url)
+
                 await query.message.reply_video(
                     video=file_id,
                     supports_streaming=True,
                     caption=caption,
+                    reply_markup=video_markup,
                     **UPLOAD_TIMEOUTS,
                 )
         try:
@@ -532,7 +553,6 @@ async def handle_download(
     platform: str,
     audio_format: str = "mp3",
     audio_quality: str = "192",
-    is_short_video: bool = False,
 ):
     start_time = time.time()
     sem = get_semaphore()
@@ -540,11 +560,7 @@ async def handle_download(
     cancel_event = threading.Event()
     _ACTIVE_DOWNLOADS[job_id] = cancel_event
 
-    if is_short_video:
-        url_key = store_url(url)
-        reply_markup = kb_short_video_download(job_id, url_key)
-    else:
-        reply_markup = kb_cancel_job(job_id)
+    reply_markup = kb_cancel_job(job_id)
 
     # Show queue position if waiting
     queue_pos = MAX_CONCURRENT_DOWNLOADS - sem._value + 1
@@ -843,6 +859,11 @@ async def handle_download(
                                     f,
                                     make_upload_callback("Video", part_label, part_name),
                                 )
+                                video_markup = None
+                                if is_short_video_link(platform, url):
+                                    k_url = store_url(url)
+                                    video_markup = kb_video_finished(k_url)
+
                                 sent_message = await send_upload(
                                     lambda: upload_call(
                                         upload_file.input_file_content,
@@ -856,6 +877,7 @@ async def handle_download(
                                             platform=platform,
                                             url=url,
                                         ),
+                                        reply_markup=video_markup,
                                         **UPLOAD_TIMEOUTS,
                                     )
                                 )
@@ -878,6 +900,7 @@ async def handle_download(
                             "performer": artist,
                             "size_mb": round(size_mb, 1),
                             "platform": platform,
+                            "url": url,
                         })
 
                 except Exception as e:
@@ -1285,7 +1308,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode=ParseMode.MARKDOWN,
         )
         adapted = AdaptedQuery(status_msg)
-        await handle_download(adapted, url, "video", "best", platform, is_short_video=True)
+        await handle_download(adapted, url, "video", "best", platform)
         return
 
     # Spotify — skip get_info (DRM), go straight to format picker
