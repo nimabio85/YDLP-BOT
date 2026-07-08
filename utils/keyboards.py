@@ -177,3 +177,13 @@ def kb_shazam_result(k: str, shazam_url: str | None = None) -> InlineKeyboardMar
     # Row 3: Dismiss
     rows.append([InlineKeyboardButton("❌ Dismiss", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
+
+
+def kb_short_video_download(job_id: str, k: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📋 Info",       callback_data=f"info|{k}"),
+            InlineKeyboardButton("🎙️ Find Music",  callback_data=f"shazamurl|{k}"),
+        ],
+        [InlineKeyboardButton("❌ Cancel download", callback_data=f"canceljob|{job_id}")],
+    ])

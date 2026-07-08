@@ -47,6 +47,7 @@ from utils.keyboards import (
     kb_search_platform, kb_search_results, kb_spotify_confirm,
     kb_thumbnail_quality, kb_setformat, kb_direct_download,
     kb_cancel_job, kb_admin_panel, kb_main_menu, kb_shazam_result,
+    kb_short_video_download,
 )
 from utils.database import (
     add_history, get_history, record_download, get_stats,
@@ -531,6 +532,7 @@ async def handle_download(
     platform: str,
     audio_format: str = "mp3",
     audio_quality: str = "192",
+    is_short_video: bool = False,
 ):
     start_time = time.time()
     sem = get_semaphore()
@@ -538,13 +540,19 @@ async def handle_download(
     cancel_event = threading.Event()
     _ACTIVE_DOWNLOADS[job_id] = cancel_event
 
+    if is_short_video:
+        url_key = store_url(url)
+        reply_markup = kb_short_video_download(job_id, url_key)
+    else:
+        reply_markup = kb_cancel_job(job_id)
+
     # Show queue position if waiting
     queue_pos = MAX_CONCURRENT_DOWNLOADS - sem._value + 1
     if sem._value == 0:
         await safe_edit(
             query,
             f"⏳ *Queued*\n\nPosition: *#{queue_pos}*\nWaiting for current downloads to finish...",
-            reply_markup=kb_cancel_job(job_id),
+            reply_markup=reply_markup,
         )
 
     # Progress bar throttle
@@ -578,7 +586,7 @@ async def handle_download(
             f"⚡ *Speed:* {speed}\n"
             f"⏳ *ETA:* {eta}\n"
             f"━━━━━━━━━━━━━━━━━━━━",
-            reply_markup=kb_cancel_job(job_id),
+            reply_markup=reply_markup,
         )
 
     def sync_progress(pct, speed, eta, downloaded=None, total=None):
@@ -608,7 +616,7 @@ async def handle_download(
             f"📊 *{fmt_size(uploaded / (1024 * 1024))} / {fmt_size(total / (1024 * 1024))}*\n"
             f"⚡ *Speed:* {fmt_size(speed / (1024 * 1024))}/s\n"
             f"━━━━━━━━━━━━━━━━━━━━",
-            reply_markup=kb_cancel_job(job_id),
+            reply_markup=reply_markup,
         )
 
     def make_upload_callback(label="Upload", part_label=None, filename=""):
@@ -658,7 +666,7 @@ async def handle_download(
             await safe_edit(
                 query,
                 f"⬇️ *Downloading* {label}...\n\nPlease wait ⏳",
-                reply_markup=kb_cancel_job(job_id),
+                reply_markup=reply_markup,
             )
 
             with tempfile.TemporaryDirectory(dir=DOWNLOAD_PATH) as tmpdir:
@@ -1277,7 +1285,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode=ParseMode.MARKDOWN,
         )
         adapted = AdaptedQuery(status_msg)
-        await handle_download(adapted, url, "video", "best", platform)
+        await handle_download(adapted, url, "video", "best", platform, is_short_video=True)
         return
 
     # Spotify — skip get_info (DRM), go straight to format picker
