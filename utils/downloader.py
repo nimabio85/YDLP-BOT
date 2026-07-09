@@ -228,8 +228,13 @@ async def download_direct_file(
             if ENABLE_ARIA2 and shutil.which("aria2c"):
                 return _download_direct_with_aria2(url, out_dir, progress_callback, cancel_event)
 
-            request = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(request, timeout=900) as response:
+            try:
+                # Try downloading using curl_cffi to bypass Cloudflare
+                from curl_cffi import requests as curl_requests
+                
+                response = curl_requests.get(url, headers=headers, impersonate="chrome", stream=True, timeout=900)
+                response.raise_for_status()
+                
                 total = int(response.headers.get("Content-Length") or 0)
                 filename = _filename_from_headers(url, response.headers)
                 target = Path(out_dir) / filename
@@ -237,12 +242,11 @@ async def download_direct_file(
                 downloaded = 0
                 start = last_report = time.time()
                 with open(target, "wb") as f:
-                    while True:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if cancel_event and cancel_event.is_set():
                             raise DownloadCancelled("Download cancelled")
-                        chunk = response.read(1024 * 1024)
                         if not chunk:
-                            break
+                            continue
                         f.write(chunk)
                         downloaded += len(chunk)
 
@@ -260,7 +264,42 @@ async def download_direct_file(
                                     total,
                                 )
                                 last_report = now
+                return str(target)
+            except Exception as e:
+                # Fallback to standard urllib.request if curl_cffi fails or is not installed
+                logger.warning(f"curl_cffi download failed or not installed: {e}. Falling back to urllib.")
+                request = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(request, timeout=900) as response:
+                    total = int(response.headers.get("Content-Length") or 0)
+                    filename = _filename_from_headers(url, response.headers)
+                    target = Path(out_dir) / filename
 
+                    downloaded = 0
+                    start = last_report = time.time()
+                    with open(target, "wb") as f:
+                        while True:
+                            if cancel_event and cancel_event.is_set():
+                                raise DownloadCancelled("Download cancelled")
+                            chunk = response.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+
+                            if progress_callback and total:
+                                now = time.time()
+                                if now - last_report >= 2:
+                                    elapsed = max(now - start, 0.1)
+                                    speed = downloaded / elapsed
+                                    remaining = max(total - downloaded, 0)
+                                    progress_callback(
+                                        downloaded / total * 100,
+                                        _format_speed(speed),
+                                        _format_eta(remaining / speed if speed else 0),
+                                        downloaded,
+                                        total,
+                                    )
+                                    last_report = now
                 return str(target)
 
         return await loop.run_in_executor(None, _download)
@@ -269,6 +308,7 @@ async def download_direct_file(
     except Exception as e:
         logger.error(f"Direct download failed: {e}")
         return None
+
 
 
 def _download_direct_with_aria2(url: str, out_dir: str, progress_callback=None, cancel_event=None) -> str:
