@@ -573,6 +573,7 @@ async def handle_download(
 
     # Progress bar throttle
     _last_pct = [0.0]
+    _last_pct_time = [0.0]
     _last_upload_pct = [0.0]
     _last_upload_time = [0.0]
     loop = asyncio.get_running_loop()
@@ -583,9 +584,13 @@ async def handle_download(
         return fmt_size(float(num_bytes) / (1024 * 1024))
 
     async def on_progress(pct, speed, eta, downloaded=None, total=None):
-        if pct - _last_pct[0] < 8:
+        now = time.time()
+        if pct < 100 and now - _last_pct_time[0] < 2:
+            return
+        if pct - _last_pct[0] < 8 and pct < 100:
             return
         _last_pct[0] = pct
+        _last_pct_time[0] = now
         filled = int(pct / 10)
         bar = "█" * filled + "░" * (10 - filled)
         if fmt == "audio":
