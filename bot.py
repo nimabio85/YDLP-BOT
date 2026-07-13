@@ -1,8 +1,11 @@
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncio
 import atexit
 import hashlib
 import logging
-import os
 import re
 import shutil
 import subprocess

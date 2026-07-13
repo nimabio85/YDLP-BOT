@@ -7,3 +7,4 @@ gallery-dl>=1.27.0
 requests>=2.32.0
 shazamio>=0.8.1
 curl-cffi>=0.7.4
+yt-dlp-ejs>=2025.11.12

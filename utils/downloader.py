@@ -85,8 +85,19 @@ def ydl_base_opts(extra: dict = None, url: str = "") -> dict:
             ),
             "Accept-Language": "en-US,en;q=0.9",
         },
+        'js_runtimes': {
+            'node': {},
+            'deno': {}
+        },
         **({"cookiefile": cookie_file} if cookie_file else {}),
     }
+    
+    # Dynamically check if the configured cookie file exists at runtime, and pass it to the options
+    import os
+    cookie_path = os.getenv('YT_DLP_COOKIE_FILE', 'cookies.txt')
+    if os.path.exists(cookie_path):
+        opts['cookiefile'] = cookie_path
+
     if extra:
         opts.update(extra)
     return opts
