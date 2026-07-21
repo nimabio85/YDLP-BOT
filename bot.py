@@ -196,7 +196,11 @@ def is_short_video_link(platform: str, url: str) -> bool:
         return True
     if platform == "youtube" and "/shorts/" in url_lower:
         return True
-    if platform == "instagram" and ("/reel/" in url_lower or "/reels/" in url_lower):
+    if platform == "instagram" and any(
+        p in url_lower for p in ("/reel/", "/reels/", "/p/", "/tv/", "/share/", "/stories/")
+    ):
+        return True
+    if platform == "facebook" and ("/reel/" in url_lower or "fb.watch" in url_lower):
         return True
     return False
 
@@ -548,6 +552,30 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
     return False
 
 
+async def try_soundcloud_audio_fallback(
+    query, url, tmpdir, audio_format, audio_quality, progress_cb, cancel_event
+):
+    """When an audio download fails, search SoundCloud by title and download the top match."""
+    info = await get_info(url)
+    title = (info or {}).get("title")
+    if not title:
+        return None
+    await safe_edit(query, "🎵 *Audio source failed.*\n\nTrying *SoundCloud* as backup...")
+    results = await search_platform(title, "soundcloud", max_results=1)
+    if not results:
+        return None
+    sc_url = results[0].get("webpage_url") or results[0].get("url")
+    if not sc_url:
+        return None
+    return await download_media(
+        sc_url, "audio", "audio", tmpdir,
+        audio_format=audio_format,
+        audio_quality=audio_quality,
+        progress_callback=progress_cb,
+        cancel_event=cancel_event,
+    )
+
+
 async def handle_download(
     query,
     url: str,
@@ -715,6 +743,21 @@ async def handle_download(
                     await safe_edit(query, "❌ *Download cancelled.*")
                     record_download(query.from_user.id, fmt, 0, False)
                     return
+
+                # Audio failed → try SoundCloud backup
+                if (
+                    (not filepath or not Path(filepath).exists())
+                    and fmt == "audio"
+                    and platform not in ("soundcloud", "spotify")
+                ):
+                    filepath = await try_soundcloud_audio_fallback(
+                        query, url, tmpdir, audio_format, audio_quality,
+                        sync_progress, cancel_event,
+                    )
+                    if filepath == CANCELLED or cancel_event.is_set():
+                        await safe_edit(query, "❌ *Download cancelled.*")
+                        record_download(query.from_user.id, fmt, 0, False)
+                        return
 
                 if not filepath or not Path(filepath).exists():
                     if await send_gallery_fallback(query, url, platform):
@@ -1179,7 +1222,7 @@ async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYP
     status_msg = await message.reply_text("🎙️ *Downloading audio to identify...*", parse_mode=ParseMode.MARKDOWN)
 
     import tempfile
-    from utils.shazam_finder import extract_audio_snippet, recognize_audio
+    from utils.shazam_finder import identify_song
 
     with tempfile.TemporaryDirectory(dir=DOWNLOAD_PATH) as tmpdir:
         try:
@@ -1193,18 +1236,12 @@ async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 ext = "mp4"
 
             input_path = str(Path(tmpdir) / f"input.{ext}")
-            snippet_path = str(Path(tmpdir) / "snippet.wav")
 
             await status_msg.edit_text("⏳ *Processing audio fingerprint...*", parse_mode=ParseMode.MARKDOWN)
             await file_obj.download_to_drive(input_path)
 
-            success = await extract_audio_snippet(input_path, snippet_path)
-            if not success or not Path(snippet_path).exists():
-                await status_msg.edit_text("❌ *Failed to extract audio signature.*", parse_mode=ParseMode.MARKDOWN)
-                return
-
             await status_msg.edit_text("🔍 *Searching Shazam database...*", parse_mode=ParseMode.MARKDOWN)
-            result = await recognize_audio(snippet_path)
+            result = await identify_song(input_path, tmpdir)
 
             if not result or "track" not in result:
                 await status_msg.edit_text("❌ *Could not identify this music.*\n\nMake sure the song is playing clearly and there is minimal background noise.", parse_mode=ParseMode.MARKDOWN)
@@ -1301,16 +1338,8 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await message.chat.send_action(ChatAction.TYPING)
 
-    # Detect short videos (YouTube Shorts, TikTok, Instagram Reels) to download them automatically in best quality
-    is_short_video = False
-    if platform == "tiktok":
-        is_short_video = True
-    elif platform == "youtube" and "/shorts/" in url.lower():
-        is_short_video = True
-    elif platform == "instagram" and ("/reel/" in url.lower() or "/reels/" in url.lower()):
-        is_short_video = True
-
-    if is_short_video:
+    # Detect short videos (YouTube Shorts, TikTok, Instagram, FB reels) to download automatically in best quality
+    if is_short_video_link(platform, url):
         status_msg = await message.reply_text(
             f"⚡ *Processing {platform.title()}...*",
             parse_mode=ParseMode.MARKDOWN,
@@ -1570,8 +1599,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         with tempfile.TemporaryDirectory(dir=DOWNLOAD_PATH) as tmpdir:
             try:
-                # Download 12s wav snippet
-                snippet_path = await download_url_snippet(url, tmpdir)
+                # Prefer a mid-track snippet (avoids intros/talking → fewer wrong matches)
+                info = await get_info(url)
+                duration = (info or {}).get("duration") or 0
+                start = duration / 3 if duration and duration > 36 else 2.0
+
+                snippet_path = await download_url_snippet(url, tmpdir, start=start)
                 if not snippet_path or not Path(snippet_path).exists():
                     await safe_edit(query, "❌ *Failed to extract audio from this link.*")
                     return
@@ -1579,6 +1612,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Query Shazam
                 await safe_edit(query, "🔍 *Searching Shazam database...*")
                 result = await recognize_audio(snippet_path)
+
+                # No match on mid-track snippet → retry from the beginning
+                if (not result or "track" not in result) and start != 2.0:
+                    snippet_path = await download_url_snippet(url, tmpdir, start=2.0)
+                    if snippet_path and Path(snippet_path).exists():
+                        result = await recognize_audio(snippet_path)
 
                 if not result or "track" not in result:
                     await safe_edit(query, "❌ *Could not identify this music.*\n\nShazam couldn't find any matching songs in the video's audio.")

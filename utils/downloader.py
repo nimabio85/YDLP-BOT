@@ -77,6 +77,7 @@ def ydl_base_opts(extra: dict = None, url: str = "") -> dict:
         "retries": 3,
         "fragment_retries": 3,
         "socket_timeout": 30,
+        "concurrent_fragment_downloads": 8,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -92,25 +93,53 @@ def ydl_base_opts(extra: dict = None, url: str = "") -> dict:
         **({"cookiefile": cookie_file} if cookie_file else {}),
     }
     
-    # Dynamically check if the configured cookie file exists at runtime, and pass it to the options
+    # Explicit env override only — never clobber per-site cookies with the default file
     import os
-    cookie_path = os.getenv('YT_DLP_COOKIE_FILE', 'cookies.txt')
-    if os.path.exists(cookie_path):
-        opts['cookiefile'] = cookie_path
+    env_cookie = os.getenv('YT_DLP_COOKIE_FILE')
+    if env_cookie and os.path.exists(env_cookie):
+        opts['cookiefile'] = env_cookie
 
     if extra:
         opts.update(extra)
     return opts
 
 
+# ── Info cache: avoid re-extracting the same URL twice (big win for Instagram) ──
+_INFO_CACHE: dict[str, tuple[float, dict]] = {}
+_INFO_CACHE_TTL = 600  # seconds
+
+
+def _cache_info(url: str, info: Optional[dict]):
+    if not info or not url:
+        return
+    if len(_INFO_CACHE) >= 64:
+        oldest = min(_INFO_CACHE, key=lambda k: _INFO_CACHE[k][0])
+        _INFO_CACHE.pop(oldest, None)
+    _INFO_CACHE[url] = (time.time(), info)
+
+
+def _cached_info(url: str) -> Optional[dict]:
+    entry = _INFO_CACHE.get(url)
+    if entry:
+        if time.time() - entry[0] < _INFO_CACHE_TTL:
+            return entry[1]
+        _INFO_CACHE.pop(url, None)
+    return None
+
+
 async def get_info(url: str) -> Optional[dict]:
+    cached = _cached_info(url)
+    if cached:
+        return cached
     opts = ydl_base_opts({"skip_download": True}, url=url)
     try:
         loop = asyncio.get_event_loop()
         def _extract():
             with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(url, download=False)
-        return await loop.run_in_executor(None, _extract)
+        info = await loop.run_in_executor(None, _extract)
+        _cache_info(url, info)
+        return info
     except Exception as e:
         logger.error(f"Info extraction failed: {e}")
         return None
@@ -421,6 +450,11 @@ async def download_media(
             "progress_hooks": hooks,
         }, url=url)
 
+    # aria2c multi-connection downloads (opt-in; per-chunk progress not reported)
+    if ENABLE_ARIA2 and shutil.which("aria2c"):
+        opts["external_downloader"] = {"default": "aria2c"}
+        opts["external_downloader_args"] = {"aria2c": ["-x", "16", "-s", "16", "-k", "1M"]}
+
     try:
         loop = asyncio.get_event_loop()
         def _download():
@@ -428,6 +462,7 @@ async def download_media(
                 if cancel_event and cancel_event.is_set():
                     raise DownloadCancelled("Download cancelled")
                 info = ydl.extract_info(url, download=True)
+                _cache_info(url, info)  # reuse for the post-download metadata lookup
                 filename = ydl.prepare_filename(info)
                 if fmt == "audio":
                     filename = Path(filename).with_suffix(f".{audio_format}").as_posix()
