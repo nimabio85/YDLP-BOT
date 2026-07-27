@@ -2025,9 +2025,15 @@ def main():
         .post_init(post_init)
     )
     if LOCAL_API_URL:
-        builder = builder.base_url(f"{LOCAL_API_URL}/bot")
-        builder = builder.base_file_url(f"{LOCAL_API_URL}/file/bot")
-        logger.info(f"🚀 Local Bot API: {LOCAL_API_URL}")
+        import urllib.request
+        try:
+            urllib.request.urlopen(f"{LOCAL_API_URL}/bot{BOT_TOKEN}/getMe", timeout=3)
+            builder = builder.base_url(f"{LOCAL_API_URL}/bot")
+            builder = builder.base_file_url(f"{LOCAL_API_URL}/file/bot")
+            logger.info(f"🚀 Local Bot API connected: {LOCAL_API_URL}")
+        except Exception as err:
+            logger.warning(f"⚠️ Local Bot API at {LOCAL_API_URL} is unreachable ({err}). Falling back to official Telegram API.")
+            logger.info("🌐 Using official Telegram Bot API.")
 
     app = builder.build()
     app.add_handler(CommandHandler("start", cmd_start, block=False))
