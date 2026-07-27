@@ -34,7 +34,7 @@ from utils.downloader import (
     detect_platform, get_info, download_media, download_spotify,
     compress_video, fetch_thumb, embed_mp3_metadata, search_platform,
     download_image, download_direct_file, split_video, split_file, CANCELLED,
-    get_cookie_file, extract_audio_cover,
+    get_cookie_file, extract_audio_cover, failure_reason,
 )
 from utils.formatting import (
     msg_start, msg_help, msg_video_card, msg_progress,
@@ -762,7 +762,11 @@ async def handle_download(
                 if not filepath or not Path(filepath).exists():
                     if await send_gallery_fallback(query, url, platform):
                         return
-                    await safe_edit(query, msg_error_download_failed())
+                    reason = failure_reason(url)
+                    await safe_edit(
+                        query,
+                        f"❌ *Download Failed*\n\n{reason}" if reason else msg_error_download_failed(),
+                    )
                     record_download(query.from_user.id, fmt, 0, False)
                     return
 
@@ -1424,10 +1428,12 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         parse_mode=ParseMode.MARKDOWN,
                     )
             else:
-                await msg.edit_text(
-                    "❌ *Media Not Found*\n\n"
+                reason = failure_reason(url) or (
                     "This post may be private, deleted, or requires login.\n"
-                    "Try logging in and exporting cookies for this platform.",
+                    "Try logging in and exporting cookies for this platform."
+                )
+                await msg.edit_text(
+                    f"❌ *Media Not Found*\n\n{reason}",
                     parse_mode=ParseMode.MARKDOWN,
                 )
         else:

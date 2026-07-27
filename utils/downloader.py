@@ -5,6 +5,7 @@ import math
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.request
 from urllib.parse import unquote, urlparse
@@ -104,6 +105,46 @@ def ydl_base_opts(extra: dict = None, url: str = "") -> dict:
     return opts
 
 
+# ── Last extraction error per URL, so the bot can explain *why* a download failed ──
+_LAST_ERROR: dict[str, str] = {}
+
+LOGIN_HINTS = (
+    "empty media response",
+    "login required",
+    "requires authentication",
+    "sign in to confirm",
+    "rate-limit reached",
+    "private video",
+    "this account is private",
+    "cookies",
+)
+
+
+def record_error(url: str, error: Exception):
+    if len(_LAST_ERROR) >= 64:
+        _LAST_ERROR.clear()
+    _LAST_ERROR[url] = str(error)
+
+
+def failure_reason(url: str) -> Optional[str]:
+    """Human-readable cause of the last failure for this URL, if we can classify it."""
+    err = (_LAST_ERROR.get(url) or "").lower()
+    if not err:
+        return None
+    if any(hint in err for hint in LOGIN_HINTS):
+        platform = detect_platform(url)
+        return (
+            f"{platform.title()} refused the request without a logged-in session.\n"
+            f"The saved cookies are missing or expired — export fresh ones "
+            f"(including `sessionid`) to `cookies/{platform}.txt`."
+        )
+    if "geo" in err or "not available in your country" in err:
+        return "This content is geo-restricted in the server's region."
+    if "unavailable" in err or "has been removed" in err or "404" in err:
+        return "The post is deleted, private, or the link is wrong."
+    return None
+
+
 # ── Info cache: avoid re-extracting the same URL twice (big win for Instagram) ──
 _INFO_CACHE: dict[str, tuple[float, dict]] = {}
 _INFO_CACHE_TTL = 600  # seconds
@@ -141,6 +182,7 @@ async def get_info(url: str) -> Optional[dict]:
         _cache_info(url, info)
         return info
     except Exception as e:
+        record_error(url, e)
         logger.error(f"Info extraction failed: {e}")
         return None
 
@@ -473,6 +515,7 @@ async def download_media(
     except DownloadCancelled:
         return CANCELLED
     except Exception as e:
+        record_error(url, e)
         logger.error(f"Download failed: {e}")
         return None
 
@@ -642,15 +685,35 @@ def split_file(input_path: str, out_dir: str, max_part_mb: int) -> list[str]:
     return outputs
 
 
+def gallery_dl_cmd() -> Optional[list[str]]:
+    """
+    Resolve how to invoke gallery-dl. pip installs its script into a Scripts/bin
+    directory that is often missing from PATH, so fall back to the module form.
+    """
+    binary = shutil.which("gallery-dl")
+    if binary:
+        return [binary]
+    try:
+        import gallery_dl  # noqa: F401
+        return [sys.executable, "-m", "gallery_dl"]
+    except ImportError:
+        return None
+
+
 async def download_image(url: str) -> list[str]:
     """Download images using gallery-dl. Returns list of downloaded file paths."""
     import tempfile
+
+    base_cmd = gallery_dl_cmd()
+    if not base_cmd:
+        logger.error("gallery-dl is not installed; cannot use the gallery fallback. pip install gallery-dl")
+        return []
+
     out_dir = tempfile.mkdtemp(dir=DOWNLOAD_PATH)
     try:
         loop = asyncio.get_event_loop()
         def _dl():
-            cmd = [
-                "gallery-dl",
+            cmd = base_cmd + [
                 "--dest", out_dir,
                 "--no-mtime",
                 "-q",
@@ -672,11 +735,6 @@ async def download_image(url: str) -> list[str]:
     except Exception as e:
         logger.error(f"gallery-dl failed: {e}")
         return []
-    try:
-        with urllib.request.urlopen(url, timeout=10) as r:
-            return r.read()
-    except Exception:
-        return None
 
 
 def embed_mp3_metadata(filepath: str, info: dict, thumb_bytes: Optional[bytes] = None):
