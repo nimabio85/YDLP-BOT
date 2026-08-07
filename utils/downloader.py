@@ -89,7 +89,9 @@ def ydl_base_opts(extra: dict = None, url: str = "", minimal: bool = False) -> d
         "retries": 3,
         "fragment_retries": 3,
         "socket_timeout": 30,
-        "concurrent_fragment_downloads": 8,
+        "concurrent_fragment_downloads": 16,
+        "buffersize": 1024 * 1024,           # 1 MB read buffer
+        "throttled_rate": 100 * 1024,         # re-request if speed < 100 KB/s (YouTube anti-throttle)
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -511,12 +513,16 @@ async def download_media(
             "progress_hooks": hooks,
         }, url=url)
     else:
+        # Relaxed format strings: accept any container (webm, mp4, etc.)
+        # and let merge_output_format handle final mp4 conversion.
+        # This avoids skipping faster DASH/VP9 streams that YouTube often
+        # serves without throttling.
         quality_map = {
-            "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "2160": "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160]",
-            "1080": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[height<=1080]",
-            "720":  "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]",
-            "480":  "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]",
+            "best": "bestvideo+bestaudio/best",
+            "2160": "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
+            "1080": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+            "720":  "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "480":  "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
         }
         opts = ydl_base_opts({
             "format": quality_map.get(quality, "best"),
@@ -528,7 +534,7 @@ async def download_media(
     # aria2c multi-connection downloads (opt-in; per-chunk progress not reported)
     if ENABLE_ARIA2 and shutil.which("aria2c"):
         opts["external_downloader"] = {"default": "aria2c"}
-        opts["external_downloader_args"] = {"aria2c": ["-x", "16", "-s", "16", "-k", "1M"]}
+        opts["external_downloader_args"] = {"aria2c": ["-x", "16", "-s", "16", "-k", "5M"]}
 
     try:
         loop = asyncio.get_event_loop()
