@@ -1436,6 +1436,25 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     f"❌ *Media Not Found*\n\n{reason}",
                     parse_mode=ParseMode.MARKDOWN,
                 )
+        elif platform not in ("generic", "direct"):
+            # Known platform but info extraction failed — still offer download
+            k = store_url(url)
+            reason = failure_reason(url)
+            error_text = (
+                f"⚠️ *Could not fetch info from {platform.title()}*\n\n"
+            )
+            if reason:
+                error_text += f"{reason}\n\n"
+            else:
+                error_text += (
+                    "This might be a temporary issue or yt-dlp may need updating.\n\n"
+                )
+            error_text += "You can still try downloading — pick a format below 👇"
+            await message.reply_text(
+                error_text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=kb_format_picker(k, platform),
+            )
         else:
             k = store_url(url)
             await message.reply_text(

@@ -70,7 +70,18 @@ def get_cookie_file(platform_or_url: str = "") -> str:
     return SITE_COOKIES.get(key, "") or COOKIES_FILE
 
 
-def ydl_base_opts(extra: dict = None, url: str = "") -> dict:
+def _has_ejs_plugin() -> bool:
+    """Check if the yt-dlp-ejs plugin is installed and usable."""
+    try:
+        import yt_dlp_ejs  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+_EJS_AVAILABLE = _has_ejs_plugin()
+
+
+def ydl_base_opts(extra: dict = None, url: str = "", minimal: bool = False) -> dict:
     cookie_file = get_cookie_file(url)
     opts = {
         "quiet": True,
@@ -87,18 +98,23 @@ def ydl_base_opts(extra: dict = None, url: str = "") -> dict:
             ),
             "Accept-Language": "en-US,en;q=0.9",
         },
-        'js_runtimes': {
-            'node': {},
-            'deno': {}
-        },
-        **({"cookiefile": cookie_file} if cookie_file else {}),
     }
-    
-    # Explicit env override only — never clobber per-site cookies with the default file
-    import os
-    env_cookie = os.getenv('YT_DLP_COOKIE_FILE')
-    if env_cookie and os.path.exists(env_cookie):
-        opts['cookiefile'] = env_cookie
+
+    # Only add js_runtimes if the EJS plugin is installed and not in minimal mode
+    if _EJS_AVAILABLE and not minimal:
+        opts['js_runtimes'] = {'node': {}, 'deno': {}}
+
+    # Cookies (skip in minimal mode to rule out expired-cookie errors)
+    if not minimal:
+        if cookie_file:
+            opts["cookiefile"] = cookie_file
+        # Explicit env override only — never clobber per-site cookies with the default file
+        import os
+        env_cookie = os.getenv('YT_DLP_COOKIE_FILE')
+        if env_cookie and os.path.exists(env_cookie):
+            opts['cookiefile'] = env_cookie
+    else:
+        opts["no_check_certificates"] = True
 
     if extra:
         opts.update(extra)
@@ -172,18 +188,35 @@ async def get_info(url: str) -> Optional[dict]:
     cached = _cached_info(url)
     if cached:
         return cached
-    opts = ydl_base_opts({"skip_download": True}, url=url)
+
+    loop = asyncio.get_event_loop()
+
+    # Attempt 1: full options
+    opts_full = ydl_base_opts({"skip_download": True}, url=url)
     try:
-        loop = asyncio.get_event_loop()
-        def _extract():
-            with yt_dlp.YoutubeDL(opts) as ydl:
+        def _extract_full():
+            with yt_dlp.YoutubeDL(opts_full) as ydl:
                 return ydl.extract_info(url, download=False)
-        info = await loop.run_in_executor(None, _extract)
+        info = await loop.run_in_executor(None, _extract_full)
         _cache_info(url, info)
         return info
     except Exception as e:
         record_error(url, e)
-        logger.error(f"Info extraction failed: {e}")
+        logger.warning(f"Info extraction attempt 1 failed: {e}")
+
+    # Attempt 2: minimal options (no cookies, no js_runtimes, no cert check)
+    opts_min = ydl_base_opts({"skip_download": True}, url=url, minimal=True)
+    try:
+        def _extract_minimal():
+            with yt_dlp.YoutubeDL(opts_min) as ydl:
+                return ydl.extract_info(url, download=False)
+        info = await loop.run_in_executor(None, _extract_minimal)
+        _cache_info(url, info)
+        logger.info("Info extraction succeeded on minimal retry")
+        return info
+    except Exception as e:
+        record_error(url, e)
+        logger.error(f"Info extraction attempt 2 (minimal) also failed: {e}")
         return None
 
 
