@@ -513,16 +513,15 @@ async def download_media(
             "progress_hooks": hooks,
         }, url=url)
     else:
-        # Relaxed format strings: accept any container (webm, mp4, etc.)
-        # and let merge_output_format handle final mp4 conversion.
-        # This avoids skipping faster DASH/VP9 streams that YouTube often
-        # serves without throttling.
+        # Prefer mp4+m4a (fast mux, Telegram-compatible) first,
+        # then fall back to any container if mp4 streams are unavailable.
+        # merge_output_format ensures the final file is always .mp4.
         quality_map = {
-            "best": "bestvideo+bestaudio/best",
-            "2160": "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
-            "1080": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-            "720":  "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "480":  "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
+            "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+            "2160": "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
+            "1080": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+            "720":  "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "480":  "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/best",
         }
         opts = ydl_base_opts({
             "format": quality_map.get(quality, "best"),
