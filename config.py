@@ -63,3 +63,7 @@ CACHE_MAX_ENTRIES: int = int(os.getenv("CACHE_MAX_ENTRIES", "1000"))
 # ── Spotify ────────────────────────────────────────────────────────────────────
 SPOTIFY_CLIENT_ID: str = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET: str = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+
+# ── Executables ────────────────────────────────────────────────────────────────
+FFMPEG_LOCATION: str = os.getenv("FFMPEG_LOCATION", "")
+

@@ -15,7 +15,7 @@ from typing import Optional, Callable
 
 import yt_dlp
 
-from config import COOKIES_FILE, DOWNLOAD_PATH, ENABLE_ARIA2, SITE_COOKIES
+from config import COOKIES_FILE, DOWNLOAD_PATH, ENABLE_ARIA2, FFMPEG_LOCATION, SITE_COOKIES
 
 logger = logging.getLogger(__name__)
 CANCELLED = "__CANCELLED__"
@@ -110,6 +110,10 @@ def ydl_base_opts(extra: dict = None, url: str = "", minimal: bool = False) -> d
         },
     }
 
+    ffmpeg_bin = FFMPEG_LOCATION or shutil.which("ffmpeg")
+    if ffmpeg_bin:
+        opts["ffmpeg_location"] = ffmpeg_bin
+
     # Only add js_runtimes if the EJS plugin is installed and not in minimal mode
     if _EJS_AVAILABLE and not minimal:
         opts['js_runtimes'] = {'node': {}, 'deno': {}}
@@ -157,6 +161,12 @@ def failure_reason(url: str) -> Optional[str]:
     err = (_LAST_ERROR.get(url) or "").lower()
     if not err:
         return None
+    if "ffmpeg" in err or "ffprobe" in err:
+        return (
+            "FFmpeg / FFprobe is not installed on the bot server.\n"
+            "Please install `ffmpeg` on your server (`sudo apt update && sudo apt install -y ffmpeg` on Linux) "
+            "or set `FFMPEG_LOCATION` in your `.env` file."
+        )
     if any(hint in err for hint in LOGIN_HINTS):
         platform = detect_platform(url)
         return (
