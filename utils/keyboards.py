@@ -48,6 +48,9 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Stats", callback_data="admin|stats"),
             InlineKeyboardButton("🚫 Blocked", callback_data="admin|blocked"),
         ],
+        [
+            InlineKeyboardButton("🔄 Update Dependencies", callback_data="admin|update"),
+        ],
     ])
 
 

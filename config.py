@@ -64,6 +64,9 @@ CACHE_MAX_ENTRIES: int = int(os.getenv("CACHE_MAX_ENTRIES", "1000"))
 SPOTIFY_CLIENT_ID: str = os.getenv("SPOTIFY_CLIENT_ID", "")
 SPOTIFY_CLIENT_SECRET: str = os.getenv("SPOTIFY_CLIENT_SECRET", "")
 
-# ── Executables ────────────────────────────────────────────────────────────────
+# ── Executables & Auto-Updates ──────────────────────────────────────────────────
 FFMPEG_LOCATION: str = os.getenv("FFMPEG_LOCATION", "")
+AUTO_UPDATE_DEPS: bool = os.getenv("AUTO_UPDATE_DEPS", "true").lower() in {"1", "true", "yes", "on"}
+UPDATE_INTERVAL_HOURS: int = int(os.getenv("UPDATE_INTERVAL_HOURS", "24"))
+
 

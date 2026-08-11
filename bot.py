@@ -29,7 +29,9 @@ from config import (
     ALLOWED_USERS, DOWNLOAD_PATH, LOCAL_API_URL,
     MAX_CONCURRENT_DOWNLOADS, MAX_DURATION_SECONDS, COOKIES_FILE,
     ENABLE_ARIA2, DATA_PATH, CACHE_TTL_DAYS, CACHE_MAX_ENTRIES,
+    AUTO_UPDATE_DEPS, UPDATE_INTERVAL_HOURS,
 )
+from utils.updater import update_dependencies
 from utils.downloader import (
     detect_platform, get_info, download_media, download_spotify,
     compress_video, fetch_thumb, embed_mp3_metadata, search_platform,
@@ -1097,10 +1099,24 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/unblock <user_id>`\n"
         "`/blocked`\n"
         "`/stats`\n"
-        "`/broadcast <message>`",
+        "`/broadcast <message>`\n"
+        "`/update`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb_admin_panel(),
     )
+
+
+async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
+        return
+    msg = await update.message.reply_text("🔄 *Updating dependencies...*\n\nRunning pip upgrade...", parse_mode=ParseMode.MARKDOWN)
+    success, output = await update_dependencies()
+    output_esc = escape_markdown(output)
+    if success:
+        await msg.edit_text(f"✅ *Dependencies Updated Successfully!*\n\n`{output_esc}`", parse_mode=ParseMode.MARKDOWN)
+    else:
+        await msg.edit_text(f"❌ *Dependency Update Failed*\n\n`{output_esc}`", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
@@ -1598,6 +1614,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = "🚫 *Blocked Users*\n\nNo blocked users."
             await safe_edit(query, text, reply_markup=kb_admin_panel())
             return
+        if action == "update":
+            await safe_edit(query, "🔄 *Updating dependencies...*\n\nRunning pip upgrade...", reply_markup=kb_admin_panel())
+            success, output = await update_dependencies()
+            output_esc = escape_markdown(output)
+            if success:
+                await safe_edit(query, f"✅ *Dependencies Updated Successfully!*\n\n`{output_esc}`", reply_markup=kb_admin_panel())
+            else:
+                await safe_edit(query, f"❌ *Dependency Update Failed*\n\n`{output_esc}`", reply_markup=kb_admin_panel())
+            return
 
     if data.startswith("menu|"):
         action = data.split("|", 1)[1]
@@ -2066,6 +2091,18 @@ def main():
 
         asyncio.create_task(_periodic_cleanup())
 
+        if AUTO_UPDATE_DEPS:
+            logger.info("Auto-update enabled: checking dependency updates on startup...")
+            asyncio.create_task(update_dependencies())
+
+            async def _periodic_dep_updater():
+                while True:
+                    await asyncio.sleep(max(1, UPDATE_INTERVAL_HOURS) * 3600)
+                    logger.info("Running periodic dependency update...")
+                    await update_dependencies()
+
+            asyncio.create_task(_periodic_dep_updater())
+
         removed_cache_entries = cleanup_download_cache(CACHE_TTL_DAYS, CACHE_MAX_ENTRIES)
         if removed_cache_entries:
             logger.info(f"Cleaned {removed_cache_entries} cached file_id entrie(s).")
@@ -2088,6 +2125,7 @@ def main():
                     *public_commands,
                     BotCommand("admin", "Owner admin panel"),
                     BotCommand("broadcast", "Broadcast to users"),
+                    BotCommand("update", "Update dependencies"),
                 ],
                 scope=BotCommandScopeChat(chat_id=OWNER_ID),
             )
@@ -2121,6 +2159,7 @@ def main():
     app.add_handler(CommandHandler("history", cmd_history, block=False))
     app.add_handler(CommandHandler("stats", cmd_stats, block=False))
     app.add_handler(CommandHandler("admin", cmd_admin, block=False))
+    app.add_handler(CommandHandler("update", cmd_update, block=False))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast, block=False))
     app.add_handler(CommandHandler("block", cmd_block, block=False))
     app.add_handler(CommandHandler("unblock", cmd_unblock, block=False))
