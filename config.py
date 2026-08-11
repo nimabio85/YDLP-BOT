@@ -69,4 +69,8 @@ FFMPEG_LOCATION: str = os.getenv("FFMPEG_LOCATION", "")
 AUTO_UPDATE_DEPS: bool = os.getenv("AUTO_UPDATE_DEPS", "true").lower() in {"1", "true", "yes", "on"}
 UPDATE_INTERVAL_HOURS: int = int(os.getenv("UPDATE_INTERVAL_HOURS", "24"))
 
+# ── Network & Proxy ────────────────────────────────────────────────────────────
+PROXY_URL: str = os.getenv("PROXY_URL", os.getenv("HTTP_PROXY", os.getenv("HTTPS_PROXY", "")))
+
+
 

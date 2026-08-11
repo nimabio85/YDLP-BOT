@@ -15,7 +15,7 @@ from typing import Optional, Callable
 
 import yt_dlp
 
-from config import COOKIES_FILE, DOWNLOAD_PATH, ENABLE_ARIA2, FFMPEG_LOCATION, SITE_COOKIES
+from config import COOKIES_FILE, DOWNLOAD_PATH, ENABLE_ARIA2, FFMPEG_LOCATION, PROXY_URL, SITE_COOKIES
 
 logger = logging.getLogger(__name__)
 CANCELLED = "__CANCELLED__"
@@ -110,6 +110,9 @@ def ydl_base_opts(extra: dict = None, url: str = "", minimal: bool = False) -> d
         },
     }
 
+    if PROXY_URL:
+        opts["proxy"] = PROXY_URL
+
     ffmpeg_bin = FFMPEG_LOCATION or shutil.which("ffmpeg")
     if ffmpeg_bin:
         opts["ffmpeg_location"] = ffmpeg_bin
@@ -147,6 +150,10 @@ LOGIN_HINTS = (
     "private video",
     "this account is private",
     "cookies",
+    "http error 400",
+    "http error 401",
+    "http error 403",
+    "bad request",
 )
 
 
@@ -377,7 +384,8 @@ async def download_direct_file(
                 # Try downloading using curl_cffi to bypass Cloudflare
                 from curl_cffi import requests as curl_requests
                 
-                response = curl_requests.get(url, headers=headers, impersonate="chrome", stream=True, timeout=900)
+                proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+                response = curl_requests.get(url, headers=headers, proxies=proxies, impersonate="chrome", stream=True, timeout=900)
                 response.raise_for_status()
                 
                 total = int(response.headers.get("Content-Length") or 0)
@@ -468,8 +476,10 @@ def _download_direct_with_aria2(url: str, out_dir: str, progress_callback=None, 
         "--console-log-level=notice",
         "--allow-overwrite=true",
         "-d", out_dir,
-        url,
     ]
+    if PROXY_URL:
+        cmd.append(f"--all-proxy={PROXY_URL}")
+    cmd.append(url)
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -506,6 +516,48 @@ def _download_direct_with_aria2(url: str, out_dir: str, progress_callback=None, 
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+async def download_via_cobalt_api(url: str, out_dir: str) -> Optional[str]:
+    """Fallback media downloader using Cobalt API endpoints (bypasses Instagram/TikTok anti-bot rate limits)."""
+    endpoints = [
+        "https://api.cobalt.tools/api/json",
+        "https://cobalt.api.scpt.one/api/json",
+    ]
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138 Safari/537.36",
+    }
+    payload = {"url": url}
+
+    try:
+        from curl_cffi import requests as curl_requests
+        loop = asyncio.get_event_loop()
+
+        def _fetch():
+            proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+            for ep in endpoints:
+                try:
+                    res = curl_requests.post(ep, json=payload, headers=headers, proxies=proxies, impersonate="chrome", timeout=15)
+                    if res.status_code == 200:
+                        data = res.json()
+                        dl_url = data.get("url")
+                        if dl_url:
+                            return dl_url
+                        picker = data.get("picker")
+                        if picker and isinstance(picker, list):
+                            return picker[0].get("url")
+                except Exception:
+                    continue
+            return None
+
+        direct_url = await loop.run_in_executor(None, _fetch)
+        if direct_url:
+            return await download_direct_file(direct_url, out_dir)
+    except Exception as e:
+        logger.warning(f"Cobalt API fallback failed: {e}")
+    return None
 
 
 async def download_media(
@@ -584,7 +636,10 @@ async def download_media(
         return CANCELLED
     except Exception as e:
         record_error(url, e)
-        logger.error(f"Download failed: {e}")
+        logger.error(f"yt-dlp download failed: {e}. Trying API fallback...")
+        cobalt_res = await download_via_cobalt_api(url, out_dir)
+        if cobalt_res:
+            return cobalt_res
         return None
 
 
@@ -609,6 +664,8 @@ async def download_spotify(
             cookie_file = get_cookie_file("spotify")
             if cookie_file:
                 cmd += ["--cookie-file", cookie_file]
+            if PROXY_URL:
+                cmd += ["--proxy", PROXY_URL]
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if result.returncode != 0:
@@ -789,6 +846,8 @@ async def download_image(url: str, out_dir: Optional[str] = None) -> list[str]:
             cookie_file = get_cookie_file(url)
             if cookie_file:
                 cmd += ["--cookies", cookie_file]
+            if PROXY_URL:
+                cmd += ["--proxy", PROXY_URL]
             cmd.append(url)
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             logger.info(f"gallery-dl stdout: {result.stdout[:300]}")
@@ -799,12 +858,21 @@ async def download_image(url: str, out_dir: Optional[str] = None) -> list[str]:
             for ext in ["jpg", "jpeg", "png", "webp", "gif", "mp4"]:
                 files += list(Path(target_dir).rglob(f"*.{ext}"))
             return sorted(files)
-        return await loop.run_in_executor(None, _dl)
-    except Exception as e:
-        logger.error(f"gallery-dl failed: {e}")
+
+        downloaded_files = await loop.run_in_executor(None, _dl)
+        if downloaded_files:
+            return downloaded_files
+
+        # Fallback to Cobalt API if gallery-dl returned no files
+        fallback_file = await download_via_cobalt_api(url, target_dir)
+        if fallback_file:
+            return [fallback_file]
         return []
     except Exception as e:
         logger.error(f"gallery-dl failed: {e}")
+        fallback_file = await download_via_cobalt_api(url, target_dir)
+        if fallback_file:
+            return [fallback_file]
         return []
 
 

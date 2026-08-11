@@ -1118,6 +1118,29 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.edit_text(f"❌ *Dependency Update Failed*\n\n`{output_esc}`", parse_mode=ParseMode.MARKDOWN)
 
+
+async def cmd_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
+        return
+    text = _get_cookies_status_text()
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+def _get_cookies_status_text() -> str:
+    from config import SITE_COOKIES, COOKIES_FILE
+    lines = ["🍪 *Cookie Files Status*\n"]
+    all_files = {"default": COOKIES_FILE, **SITE_COOKIES}
+    for site, path in all_files.items():
+        if path and Path(path).exists():
+            sz = Path(path).stat().st_size
+            lines.append(f"  • `{site}`: ✅ Active (`{path}`, {sz} bytes)")
+        else:
+            p_str = path or f"cookies/{site}.txt"
+            lines.append(f"  • `{site}`: ❌ Missing (`{p_str}`)")
+    lines.append("\n*To add cookies:*\nExport Netscape-format cookies to `cookies/<site>.txt` on your server host.")
+    return "\n".join(lines)
+
 async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         await update.message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
@@ -1623,6 +1646,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await safe_edit(query, f"❌ *Dependency Update Failed*\n\n`{output_esc}`", reply_markup=kb_admin_panel())
             return
+        if action == "cookies":
+            text = _get_cookies_status_text()
+            await safe_edit(query, text, reply_markup=kb_admin_panel())
+            return
 
     if data.startswith("menu|"):
         action = data.split("|", 1)[1]
@@ -2126,6 +2153,7 @@ def main():
                     BotCommand("admin", "Owner admin panel"),
                     BotCommand("broadcast", "Broadcast to users"),
                     BotCommand("update", "Update dependencies"),
+                    BotCommand("cookies", "Check cookie files status"),
                 ],
                 scope=BotCommandScopeChat(chat_id=OWNER_ID),
             )
@@ -2160,6 +2188,7 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats, block=False))
     app.add_handler(CommandHandler("admin", cmd_admin, block=False))
     app.add_handler(CommandHandler("update", cmd_update, block=False))
+    app.add_handler(CommandHandler("cookies", cmd_cookies, block=False))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast, block=False))
     app.add_handler(CommandHandler("block", cmd_block, block=False))
     app.add_handler(CommandHandler("unblock", cmd_unblock, block=False))

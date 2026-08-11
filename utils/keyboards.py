@@ -50,6 +50,7 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🔄 Update Dependencies", callback_data="admin|update"),
+            InlineKeyboardButton("🍪 Cookies", callback_data="admin|cookies"),
         ],
     ])
 
