@@ -543,18 +543,29 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
         if not files:
             return False
 
-        sent = 0
+        valid_files = []
         total_mb = 0.0
         for fpath in files[:20]:
             path = Path(fpath)
             if not path.exists() or not path.is_file():
                 continue
             size_mb = path.stat().st_size / (1024 * 1024)
-            total_mb += size_mb
             if size_mb > MAX_FILE_SIZE_MB:
                 logger.warning("Skipping gallery file over limit: %s", path)
                 continue
-            try:
+            total_mb += size_mb
+            valid_files.append(str(path))
+
+        if not valid_files:
+            return False
+
+        from telegram import InputMediaPhoto, InputMediaVideo
+
+        sent = 0
+        try:
+            if len(valid_files) == 1:
+                fpath = valid_files[0]
+                path = Path(fpath)
                 with open(path, "rb") as f:
                     if path.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv"}:
                         await send_upload(
@@ -577,9 +588,28 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
                                 **UPLOAD_TIMEOUTS,
                             )
                         )
-                sent += 1
-            except Exception as e:
-                logger.error(f"Gallery fallback send failed: {e}")
+                sent = 1
+            else:
+                # Send as grouped media albums in batches of 10 (Telegram max limit)
+                for i in range(0, len(valid_files), 10):
+                    batch = valid_files[i:i+10]
+                    media_group = []
+                    for j, fpath in enumerate(batch):
+                        path = Path(fpath)
+                        with open(path, "rb") as f:
+                            data = f.read()
+                        cap = (
+                            final_caption(query, title=f"{platform.title()} media", platform=platform, url=url)
+                            if (i == 0 and j == 0) else None
+                        )
+                        if path.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv"}:
+                            media_group.append(InputMediaVideo(media=data, caption=cap))
+                        else:
+                            media_group.append(InputMediaPhoto(media=data, caption=cap))
+                    await query.message.reply_media_group(media=media_group)
+                    sent += len(batch)
+        except Exception as e:
+            logger.error(f"Gallery fallback send failed: {e}")
 
         if sent:
             try:
