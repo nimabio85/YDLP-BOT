@@ -158,9 +158,10 @@ def record_error(url: str, error: Exception):
 
 def failure_reason(url: str) -> Optional[str]:
     """Human-readable cause of the last failure for this URL, if we can classify it."""
-    err = (_LAST_ERROR.get(url) or "").lower()
-    if not err:
+    raw_err = _LAST_ERROR.get(url) or ""
+    if not raw_err:
         return None
+    err = raw_err.lower()
     if "ffmpeg" in err or "ffprobe" in err:
         return (
             "FFmpeg / FFprobe is not installed on the bot server.\n"
@@ -178,7 +179,16 @@ def failure_reason(url: str) -> Optional[str]:
         return "This content is geo-restricted in the server's region."
     if "unavailable" in err or "has been removed" in err or "404" in err:
         return "The post is deleted, private, or the link is wrong."
-    return None
+    if "requested format is not available" in err:
+        return "The requested quality/format is not available for this media."
+    if "429" in err or "too many requests" in err:
+        return "Rate-limited by platform (HTTP 429). Please wait a few minutes before trying again."
+
+    clean_lines = [line.strip() for line in raw_err.splitlines() if line.strip()]
+    last_line = clean_lines[-1] if clean_lines else raw_err
+    if len(last_line) > 250:
+        last_line = last_line[:247] + "..."
+    return f"Details: `{last_line}`"
 
 
 # ── Info cache: avoid re-extracting the same URL twice (big win for Instagram) ──
