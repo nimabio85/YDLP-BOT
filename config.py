@@ -47,8 +47,13 @@ SITE_COOKIES: dict[str, str] = {
 }
 
 # ── Queue ──────────────────────────────────────────────────────────────────────
+import shutil
 MAX_CONCURRENT_DOWNLOADS: int = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "2"))
-ENABLE_ARIA2: bool = os.getenv("ENABLE_ARIA2", "false").lower() in {"1", "true", "yes", "on"}
+_raw_aria2 = os.getenv("ENABLE_ARIA2")
+if _raw_aria2 is not None:
+    ENABLE_ARIA2: bool = _raw_aria2.lower() in {"1", "true", "yes", "on"}
+else:
+    ENABLE_ARIA2: bool = shutil.which("aria2c") is not None
 
 # ── Limits ─────────────────────────────────────────────────────────────────────
 MAX_DURATION_SECONDS: int = int(os.getenv("MAX_DURATION_SECONDS", str(3 * 3600)))  # 3h

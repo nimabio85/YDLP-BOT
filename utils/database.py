@@ -34,6 +34,8 @@ def _get_conn():
 def init_db():
     Path(DATA_PATH).mkdir(parents=True, exist_ok=True)
     with _get_conn() as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

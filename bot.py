@@ -73,10 +73,47 @@ _LOCK_HANDLE = None
 def store_url(url: str) -> str:
     key = hashlib.md5(url.encode()).hexdigest()[:8]
     _URL_CACHE[key] = url
+    if len(_URL_CACHE) > 2000:
+        oldest_key = next(iter(_URL_CACHE))
+        _URL_CACHE.pop(oldest_key, None)
     return key
 
 def resolve_url(key: str) -> Optional[str]:
     return _URL_CACHE.get(key)
+
+
+def cleanup_temp_dir(max_age_hours: int = 1):
+    """Remove leftover temporary files and directories in DOWNLOAD_PATH older than max_age_hours."""
+    try:
+        now = time.time()
+        cutoff = now - (max_age_hours * 3600)
+        base_dir = Path(DOWNLOAD_PATH)
+        if not base_dir.exists():
+            return
+        for item in base_dir.iterdir():
+            try:
+                st = item.stat()
+                if st.st_mtime < cutoff:
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
+            except Exception as err:
+                logger.debug(f"Could not clean up temp item {item}: {err}")
+    except Exception as e:
+        logger.warning(f"Error during temp directory cleanup: {e}")
+
+
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Unhandled exception caught by global_error_handler:", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ *An unexpected error occurred.* Please try sending the link again.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
 
 
 class AdaptedQuery:
@@ -499,57 +536,58 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
         "🖼 *Trying gallery fallback...*\n\n"
         "This platform sometimes needs the gallery downloader instead of yt-dlp.",
     )
-    files = await download_image(url)
-    if not files:
+    with tempfile.TemporaryDirectory(dir=DOWNLOAD_PATH) as tmpdir:
+        files = await download_image(url, out_dir=tmpdir)
+        if not files:
+            return False
+
+        sent = 0
+        total_mb = 0.0
+        for fpath in files[:20]:
+            path = Path(fpath)
+            if not path.exists() or not path.is_file():
+                continue
+            size_mb = path.stat().st_size / (1024 * 1024)
+            total_mb += size_mb
+            if size_mb > MAX_FILE_SIZE_MB:
+                logger.warning("Skipping gallery file over limit: %s", path)
+                continue
+            try:
+                with open(path, "rb") as f:
+                    if path.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv"}:
+                        await send_upload(
+                            lambda: upload_call(
+                                f,
+                                query.message.reply_video,
+                                video=f,
+                                supports_streaming=True,
+                                caption=final_caption(query, title=path.stem, platform=platform, url=url),
+                                **UPLOAD_TIMEOUTS,
+                            )
+                        )
+                    else:
+                        await send_upload(
+                            lambda: upload_call(
+                                f,
+                                query.message.reply_photo,
+                                photo=f,
+                                caption=final_caption(query, title=path.stem, platform=platform, url=url),
+                                **UPLOAD_TIMEOUTS,
+                            )
+                        )
+                sent += 1
+            except Exception as e:
+                logger.error(f"Gallery fallback send failed: {e}")
+
+        if sent:
+            try:
+                await query.message.delete()
+            except Exception:
+                await safe_edit(query, f"✅ *Sent {sent} media file(s).*")
+            add_history(query.from_user.id, f"{platform.title()} media", url, "media", total_mb, platform)
+            record_download(query.from_user.id, "media", total_mb, True)
+            return True
         return False
-
-    sent = 0
-    total_mb = 0.0
-    for fpath in files[:20]:
-        path = Path(fpath)
-        if not path.exists() or not path.is_file():
-            continue
-        size_mb = path.stat().st_size / (1024 * 1024)
-        total_mb += size_mb
-        if size_mb > MAX_FILE_SIZE_MB:
-            logger.warning("Skipping gallery file over limit: %s", path)
-            continue
-        try:
-            with open(path, "rb") as f:
-                if path.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv"}:
-                    await send_upload(
-                        lambda: upload_call(
-                            f,
-                            query.message.reply_video,
-                            video=f,
-                            supports_streaming=True,
-                            caption=final_caption(query, title=path.stem, platform=platform, url=url),
-                            **UPLOAD_TIMEOUTS,
-                        )
-                    )
-                else:
-                    await send_upload(
-                        lambda: upload_call(
-                            f,
-                            query.message.reply_photo,
-                            photo=f,
-                            caption=final_caption(query, title=path.stem, platform=platform, url=url),
-                            **UPLOAD_TIMEOUTS,
-                        )
-                    )
-            sent += 1
-        except Exception as e:
-            logger.error(f"Gallery fallback send failed: {e}")
-
-    if sent:
-        try:
-            await query.message.delete()
-        except Exception:
-            await safe_edit(query, f"✅ *Sent {sent} media file(s).*")
-        add_history(query.from_user.id, f"{platform.title()} media", url, "media", total_mb, platform)
-        record_download(query.from_user.id, "media", total_mb, True)
-        return True
-    return False
 
 
 async def try_soundcloud_audio_fallback(
@@ -616,9 +654,7 @@ async def handle_download(
 
     async def on_progress(pct, speed, eta, downloaded=None, total=None):
         now = time.time()
-        if pct < 100 and now - _last_pct_time[0] < 2:
-            return
-        if pct - _last_pct[0] < 8 and pct < 100:
+        if pct < 100 and (now - _last_pct_time[0] < 2.5 or pct - _last_pct[0] < 10):
             return
         _last_pct[0] = pct
         _last_pct_time[0] = now
@@ -650,9 +686,9 @@ async def handle_download(
             pass
 
     async def on_upload_progress(uploaded, total, speed, label="Upload", part_label=None, filename=""):
-        pct = min(uploaded / total * 100, 100)
+        pct = min(uploaded / max(total, 1) * 100, 100)
         now = time.time()
-        if pct < 100 and pct - _last_upload_pct[0] < 5 and now - _last_upload_time[0] < 2:
+        if pct < 100 and (now - _last_upload_time[0] < 2.5 or pct - _last_upload_pct[0] < 10):
             return
         _last_upload_pct[0] = pct
         _last_upload_time[0] = now
@@ -673,6 +709,10 @@ async def handle_download(
 
     def make_upload_callback(label="Upload", part_label=None, filename=""):
         def _callback(uploaded, total, speed):
+            now = time.time()
+            pct = min(uploaded / max(total, 1) * 100, 100)
+            if pct < 100 and (now - _last_upload_time[0] < 2.5 or pct - _last_upload_pct[0] < 10):
+                return
             try:
                 asyncio.run_coroutine_threadsafe(
                     on_upload_progress(uploaded, total, speed, label, part_label, filename),
@@ -1380,62 +1420,63 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "🖼 *Fetching media...*",
                 parse_mode=ParseMode.MARKDOWN,
             )
-            files = await download_image(url)
-            if files:
-                try:
-                    # Send as media group if multiple, single photo if one
-                    from telegram import InputMediaPhoto, InputMediaVideo
-                    if len(files) == 1:
-                        fpath = files[0]
-                        media_caption = build_final_caption(
-                            context.bot.username,
-                            title=Path(fpath).stem,
-                            platform=platform,
-                            url=url,
-                        )
-                        with open(fpath, "rb") as f:
-                            if str(fpath).endswith(".mp4"):
-                                await message.reply_video(video=f, caption=media_caption)
-                            else:
-                                await message.reply_photo(photo=f, caption=media_caption)
-                    else:
-                        # Send in groups of 10 (Telegram limit)
-                        for i in range(0, len(files), 10):
-                            batch = files[i:i+10]
-                            media = []
-                            for j, fpath in enumerate(batch):
-                                with open(fpath, "rb") as f:
-                                    data = f.read()
-                                caption = (
-                                    build_final_caption(
-                                        context.bot.username,
-                                        title=f"{platform.title()} media",
-                                        platform=platform,
-                                        url=url,
-                                    )
-                                    if i == 0 and j == 0 else None
-                                )
+            with tempfile.TemporaryDirectory(dir=DOWNLOAD_PATH) as tmpdir:
+                files = await download_image(url, out_dir=tmpdir)
+                if files:
+                    try:
+                        # Send as media group if multiple, single photo if one
+                        from telegram import InputMediaPhoto, InputMediaVideo
+                        if len(files) == 1:
+                            fpath = files[0]
+                            media_caption = build_final_caption(
+                                context.bot.username,
+                                title=Path(fpath).stem,
+                                platform=platform,
+                                url=url,
+                            )
+                            with open(fpath, "rb") as f:
                                 if str(fpath).endswith(".mp4"):
-                                    media.append(InputMediaVideo(media=data, caption=caption))
+                                    await message.reply_video(video=f, caption=media_caption)
                                 else:
-                                    media.append(InputMediaPhoto(media=data, caption=caption))
-                            await message.reply_media_group(media=media)
-                    await msg.delete()
-                except Exception as e:
-                    logger.error(f"Image send failed: {e}")
+                                    await message.reply_photo(photo=f, caption=media_caption)
+                        else:
+                            # Send in groups of 10 (Telegram limit)
+                            for i in range(0, len(files), 10):
+                                batch = files[i:i+10]
+                                media = []
+                                for j, fpath in enumerate(batch):
+                                    with open(fpath, "rb") as f:
+                                        data = f.read()
+                                    caption = (
+                                        build_final_caption(
+                                            context.bot.username,
+                                            title=f"{platform.title()} media",
+                                            platform=platform,
+                                            url=url,
+                                        )
+                                        if i == 0 and j == 0 else None
+                                    )
+                                    if str(fpath).endswith(".mp4"):
+                                        media.append(InputMediaVideo(media=data, caption=caption))
+                                    else:
+                                        media.append(InputMediaPhoto(media=data, caption=caption))
+                                await message.reply_media_group(media=media)
+                        await msg.delete()
+                    except Exception as e:
+                        logger.error(f"Image send failed: {e}")
+                        await msg.edit_text(
+                            "❌ *Could not send media.*\n\nThe post may be private or deleted.",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                else:
+                    reason = failure_reason(url) or (
+                        "This post may be private, deleted, or requires login.\n"
+                        "Try logging in and exporting cookies for this platform."
+                    )
                     await msg.edit_text(
-                        "❌ *Could not send media.*\n\nThe post may be private or deleted.",
+                        f"❌ *Media Not Found*\n\n{reason}",
                         parse_mode=ParseMode.MARKDOWN,
                     )
-            else:
-                reason = failure_reason(url) or (
-                    "This post may be private, deleted, or requires login.\n"
-                    "Try logging in and exporting cookies for this platform."
-                )
-                await msg.edit_text(
-                    f"❌ *Media Not Found*\n\n{reason}",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
         elif platform not in ("generic", "direct"):
             # Known platform but info extraction failed — still offer download
             k = store_url(url)
@@ -2014,6 +2055,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     acquire_process_lock()
     async def post_init(application: Application):
+        # Clean up orphan temporary files on startup
+        cleanup_temp_dir()
+
+        # Run periodic background cleanup every 1 hour
+        async def _periodic_cleanup():
+            while True:
+                await asyncio.sleep(3600)
+                cleanup_temp_dir()
+
+        asyncio.create_task(_periodic_cleanup())
+
         removed_cache_entries = cleanup_download_cache(CACHE_TTL_DAYS, CACHE_MAX_ENTRIES)
         if removed_cache_entries:
             logger.info(f"Cleaned {removed_cache_entries} cached file_id entrie(s).")
@@ -2061,6 +2113,7 @@ def main():
             logger.info("🌐 Using official Telegram Bot API.")
 
     app = builder.build()
+    app.add_error_handler(global_error_handler)
     app.add_handler(CommandHandler("start", cmd_start, block=False))
     app.add_handler(CommandHandler("menu", cmd_menu, block=False))
     app.add_handler(CommandHandler("help", cmd_help, block=False))

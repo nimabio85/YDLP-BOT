@@ -8,8 +8,8 @@ User=root
 WorkingDirectory=/root/ytdl-bot
 EnvironmentFile=/root/ytdl-bot/.env
 ExecStart=/root/ytdl-bot/venv/bin/python bot.py
-Restart=on-failure
-RestartSec=5s
+Restart=always
+RestartSec=3s
 StandardOutput=journal
 StandardError=journal
 

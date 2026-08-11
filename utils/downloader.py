@@ -86,12 +86,20 @@ def ydl_base_opts(extra: dict = None, url: str = "", minimal: bool = False) -> d
     opts = {
         "quiet": True,
         "no_warnings": True,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 10,
+        "fragment_retries": 10,
+        "retry_sleep_functions": {"http": lambda n: 1},
         "socket_timeout": 30,
         "concurrent_fragment_downloads": 16,
+        "http_chunk_size": 10485760,         # 10 MB chunks to defeat YouTube anti-bot bandwidth throttling
         "buffersize": 1024 * 1024,           # 1 MB read buffer
-        "throttled_rate": 100 * 1024,         # re-request if speed < 100 KB/s (YouTube anti-throttle)
+        "throttled_rate": 100 * 1024,         # re-request if speed < 100 KB/s
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "mweb", "web"],
+                "player_skip": ["webpage", "configs"],
+            }
+        },
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -434,6 +442,8 @@ def _download_direct_with_aria2(url: str, out_dir: str, progress_callback=None, 
         "--max-tries=3",
         "--max-connection-per-server=16",
         "--split=16",
+        "--min-split-size=1M",
+        "-k", "1M",
         "--summary-interval=1",
         "--console-log-level=notice",
         "--allow-overwrite=true",
@@ -533,7 +543,7 @@ async def download_media(
     # aria2c multi-connection downloads (opt-in; per-chunk progress not reported)
     if ENABLE_ARIA2 and shutil.which("aria2c"):
         opts["external_downloader"] = {"default": "aria2c"}
-        opts["external_downloader_args"] = {"aria2c": ["-x", "16", "-s", "16", "-k", "5M"]}
+        opts["external_downloader_args"] = {"aria2c": ["-x", "16", "-s", "16", "-k", "1M", "--min-split-size=1M"]}
 
     try:
         loop = asyncio.get_event_loop()
@@ -738,7 +748,7 @@ def gallery_dl_cmd() -> Optional[list[str]]:
         return None
 
 
-async def download_image(url: str) -> list[str]:
+async def download_image(url: str, out_dir: Optional[str] = None) -> list[str]:
     """Download images using gallery-dl. Returns list of downloaded file paths."""
     import tempfile
 
@@ -747,12 +757,12 @@ async def download_image(url: str) -> list[str]:
         logger.error("gallery-dl is not installed; cannot use the gallery fallback. pip install gallery-dl")
         return []
 
-    out_dir = tempfile.mkdtemp(dir=DOWNLOAD_PATH)
+    target_dir = out_dir or tempfile.mkdtemp(dir=DOWNLOAD_PATH)
     try:
         loop = asyncio.get_event_loop()
         def _dl():
             cmd = base_cmd + [
-                "--dest", out_dir,
+                "--dest", target_dir,
                 "--no-mtime",
                 "-q",
             ]
@@ -767,9 +777,12 @@ async def download_image(url: str) -> list[str]:
             # Find all downloaded images
             files = []
             for ext in ["jpg", "jpeg", "png", "webp", "gif", "mp4"]:
-                files += list(Path(out_dir).rglob(f"*.{ext}"))
+                files += list(Path(target_dir).rglob(f"*.{ext}"))
             return sorted(files)
         return await loop.run_in_executor(None, _dl)
+    except Exception as e:
+        logger.error(f"gallery-dl failed: {e}")
+        return []
     except Exception as e:
         logger.error(f"gallery-dl failed: {e}")
         return []
