@@ -629,9 +629,17 @@ async def download_media(
                 filename = ydl.prepare_filename(info)
                 if fmt == "audio":
                     filename = Path(filename).with_suffix(f".{audio_format}").as_posix()
+                if Path(filename).exists():
+                    return str(filename)
                 base = Path(filename).stem
-                matches = list(Path(filename).parent.glob(f"{base}*"))
-                return str(matches[0]) if matches else filename
+                matches = list(Path(out_dir).glob(f"{base}*"))
+                if matches:
+                    return str(matches[0])
+                all_files = [
+                    p for p in Path(out_dir).rglob("*")
+                    if p.is_file() and p.suffix.lower().lstrip(".") in {"mp3", "m4a", "flac", "wav", "ogg", "opus", "mp4", "mkv", "webm"}
+                ]
+                return str(all_files[0]) if all_files else filename
         return await loop.run_in_executor(None, _download)
     except DownloadCancelled:
         return CANCELLED
@@ -680,6 +688,57 @@ async def fetch_spotify_track_metadata(url: str) -> dict:
         logger.warning(f"Spotify page meta fetch failed: {e}")
 
     return meta
+
+
+def is_raw_machine_id(text: str) -> bool:
+    if not text:
+        return True
+    t_clean = text.strip().lower()
+    if re.match(r'^(pinterest|instagram|tiktok|twitter|facebook|reddit|soundcloud|youtube|video|photo|media|file|post|pin)[\_\-]?\d+$', t_clean):
+        return True
+    if re.match(r'^\d{5,}$', t_clean) or re.match(r'^[a-f0-9]{16,}$', t_clean):
+        return True
+    return False
+
+
+def clean_display_title(title: str | None, platform: str | None = None) -> str | None:
+    if not title:
+        return None
+    cleaned = " ".join(str(title).split())
+    if is_raw_machine_id(cleaned):
+        return None
+    cleaned = re.sub(r'\s*[\|•\-]\s*(Pinterest|Instagram|TikTok|Twitter|Facebook|Reddit|Self)\s*$', '', cleaned, flags=re.IGNORECASE)
+    return cleaned.strip() or None
+
+
+async def fetch_web_page_title(url: str) -> Optional[str]:
+    """Fetch og:title or HTML <title> tag for a URL as a human fallback title."""
+    if not url or not url.startswith("http"):
+        return None
+    try:
+        loop = asyncio.get_event_loop()
+        def _fetch():
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as r:
+                html = r.read().decode("utf-8", errors="ignore")
+                match = (
+                    re.search(r'<meta property="og:title" content="([^"]+)"', html)
+                    or re.search(r'<meta name="title" content="([^"]+)"', html)
+                    or re.search(r'<title>(.*?)</title>', html)
+                )
+                if match:
+                    raw_title = match.group(1).strip()
+                    clean = clean_display_title(raw_title)
+                    if clean:
+                        return clean
+            return None
+        return await loop.run_in_executor(None, _fetch)
+    except Exception as e:
+        logger.debug(f"Web page title fetch failed for {url}: {e}")
+        return None
 
 
 async def download_spotify(

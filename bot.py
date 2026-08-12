@@ -37,6 +37,7 @@ from utils.downloader import (
     compress_video, fetch_thumb, embed_mp3_metadata, search_platform,
     download_image, download_direct_file, split_video, split_file, CANCELLED,
     get_cookie_file, extract_audio_cover, failure_reason,
+    fetch_web_page_title, clean_display_title,
 )
 from utils.formatting import (
     msg_start, msg_help, msg_video_card, msg_progress,
@@ -139,9 +140,9 @@ def build_final_caption(
     lines = []
     if label:
         lines.append(label)
-    if title:
-        clean_title = " ".join(str(title).split())
-        lines.append(f"🎬 {clean_title[:120]}")
+    clean_t = clean_display_title(title, platform)
+    if clean_t:
+        lines.append(f"🎬 {clean_t[:120]}")
     if platform:
         lines.append(f"🔗 {platform.title()}")
     elif url:
@@ -563,6 +564,7 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
 
         from telegram import InputMediaPhoto, InputMediaVideo
 
+        web_title = await fetch_web_page_title(url) if url else None
         sent = 0
         try:
             if len(valid_files) == 1:
@@ -576,7 +578,7 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
                                 query.message.reply_video,
                                 video=f,
                                 supports_streaming=True,
-                                caption=final_caption(query, title=path.stem, platform=platform, url=url),
+                                caption=final_caption(query, title=web_title, platform=platform, url=url),
                                 **UPLOAD_TIMEOUTS,
                             )
                         )
@@ -586,7 +588,7 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
                                 f,
                                 query.message.reply_photo,
                                 photo=f,
-                                caption=final_caption(query, title=path.stem, platform=platform, url=url),
+                                caption=final_caption(query, title=web_title, platform=platform, url=url),
                                 **UPLOAD_TIMEOUTS,
                             )
                         )
@@ -1497,11 +1499,12 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     try:
                         # Send as media group if multiple, single photo if one
                         from telegram import InputMediaPhoto, InputMediaVideo
+                        web_title = await fetch_web_page_title(url) if url else None
                         if len(files) == 1:
                             fpath = files[0]
                             media_caption = build_final_caption(
                                 context.bot.username,
-                                title=Path(fpath).stem,
+                                title=web_title,
                                 platform=platform,
                                 url=url,
                             )
