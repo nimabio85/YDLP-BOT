@@ -21,7 +21,7 @@ ytdl-bot downloads videos, audio, image posts, and direct files from dozens of p
 - **Video downloads** — Best, 4K, 1080p, 720p, 480p
 - **Audio extraction** — MP3, M4A, FLAC, WAV with embedded metadata and cover art
 - **Music identification** — Recognize songs from voice notes, audio, or video messages via Shazam, then download them in one tap
-- **Multi-platform support** — YouTube, Instagram, TikTok, Reddit, Twitter/X, Facebook, Twitch, SoundCloud, Spotify, PixelDrain, KrakenFiles, Google Drive, and most other yt-dlp-supported sites
+- **Multi-platform support** — YouTube, Instagram, Pinterest, TikTok, Reddit, Twitter/X, Facebook, Twitch, SoundCloud, Spotify, PixelDrain, KrakenFiles, Google Drive, and most other yt-dlp-supported sites
 - **Direct file downloads** — Unknown or direct URLs are downloaded as files, with optional `aria2c` acceleration
 - **Image and gallery posts** — Uses `gallery-dl` for photo/gallery platforms
 - **Search** — Search YouTube and SoundCloud directly from Telegram

@@ -44,6 +44,7 @@ SITE_COOKIES: dict[str, str] = {
     "spotify": _cookie_path("SPOTIFY_COOKIES_FILE"),
     "twitter": _cookie_path("TWITTER_COOKIES_FILE"),
     "facebook": _cookie_path("FACEBOOK_COOKIES_FILE"),
+    "pinterest": _cookie_path("PINTEREST_COOKIES_FILE"),
 }
 
 # ── Queue ──────────────────────────────────────────────────────────────────────

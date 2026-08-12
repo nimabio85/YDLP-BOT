@@ -34,6 +34,7 @@ PLATFORM_DOMAINS = {
     "reddit": ["reddit.com", "v.redd.it"],
     "tiktok": ["tiktok.com"],
     "spotify": ["open.spotify.com"],
+    "pinterest": ["pinterest.com", "pin.it"],
     "pixeldrain": ["pixeldrain.com"],
     "krakenfiles": ["krakenfiles.com"],
     "google_drive": ["drive.google.com"],
@@ -66,7 +67,7 @@ def get_cookie_file(platform_or_url: str = "") -> str:
     if "://" in platform_or_url:
         key = detect_platform(platform_or_url)
     if key == "spotify":
-        return SITE_COOKIES.get("spotify") or SITE_COOKIES.get("youtube") or COOKIES_FILE
+        return SITE_COOKIES.get("youtube") or COOKIES_FILE
     return SITE_COOKIES.get(key, "") or COOKIES_FILE
 
 
@@ -643,14 +644,56 @@ async def download_media(
         return None
 
 
+async def fetch_spotify_track_metadata(url: str) -> dict:
+    """Fetch Spotify track title, artist, and thumbnail URL via oEmbed and page meta tags."""
+    import json
+    meta = {"title": "", "artist": "", "cover_url": ""}
+    # 1. Try Spotify oEmbed endpoint
+    try:
+        oembed_url = f"https://open.spotify.com/oembed?url={url}"
+        req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            meta["title"] = data.get("title", "")
+            meta["cover_url"] = data.get("thumbnail_url", "")
+    except Exception as e:
+        logger.warning(f"Spotify oEmbed fetch failed: {e}")
+
+    # 2. Try page meta tags for artist & title parsing
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            html = r.read().decode("utf-8", errors="ignore")
+            title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+            desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+
+            if title_match and not meta["title"]:
+                meta["title"] = title_match.group(1)
+
+            if desc_match:
+                desc = desc_match.group(1)
+                # og:description format: "Artist · Album · Song · Year"
+                parts = [p.strip() for p in desc.split("·") if p.strip()]
+                if parts:
+                    meta["artist"] = parts[0]
+    except Exception as e:
+        logger.warning(f"Spotify page meta fetch failed: {e}")
+
+    return meta
+
+
 async def download_spotify(
     url: str,
     out_dir: str,
     audio_format: str = "mp3",
     audio_quality: str = "192",
 ) -> Optional[str]:
-    """Download Spotify track via spotdl."""
+    """Download Spotify track via spotdl with fallback to YouTube search + ID3 metadata embedding."""
     Path(out_dir).mkdir(parents=True, exist_ok=True)
+    from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+    spotdl_stderr = ""
+
+    # Step 1: Try SpotDL CLI
     try:
         loop = asyncio.get_event_loop()
         def _dl():
@@ -661,7 +704,9 @@ async def download_spotify(
             ]
             if audio_quality and audio_quality != "0":
                 cmd += ["--bitrate", f"{audio_quality}k"]
-            cookie_file = get_cookie_file("spotify")
+            if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+                cmd += ["--client-id", SPOTIFY_CLIENT_ID, "--client-secret", SPOTIFY_CLIENT_SECRET]
+            cookie_file = get_cookie_file("spotify")  # Returns YouTube cookie file for yt-dlp
             if cookie_file:
                 cmd += ["--cookie-file", cookie_file]
             if PROXY_URL:
@@ -669,20 +714,55 @@ async def download_spotify(
 
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if result.returncode != 0:
-                logger.error(f"spotdl error: {result.stderr}")
-                return None
-            # Find downloaded file
+                logger.error(f"spotdl error: {result.stderr[:300]}")
+                return None, result.stderr
+
             matches = list(Path(out_dir).rglob(f"*.{audio_format}"))
             if not matches:
                 matches = [
                     p for p in Path(out_dir).rglob("*")
                     if p.is_file() and p.suffix.lower().lstrip(".") in {"mp3", "m4a", "opus", "flac", "wav"}
                 ]
-            return str(matches[0]) if matches else None
-        return await loop.run_in_executor(None, _dl)
+            return (str(matches[0]), "") if matches else (None, "SpotDL generated no audio file")
+
+        file_path, spotdl_stderr = await loop.run_in_executor(None, _dl)
+        if file_path and Path(file_path).exists():
+            return file_path
     except Exception as e:
-        logger.error(f"Spotify download failed: {e}")
-        return None
+        spotdl_stderr = str(e)
+        logger.error(f"Spotify spotdl execution failed: {e}")
+
+    # Step 2: Fallback — Fetch track metadata and search YouTube
+    logger.info("SpotDL download unsuccessful. Falling back to YouTube search for Spotify track...")
+    meta = await fetch_spotify_track_metadata(url)
+    title = meta.get("title", "")
+    artist = meta.get("artist", "")
+    search_query = f"{artist} - {title}" if (artist and title) else (title or artist)
+
+    if search_query:
+        yt_search_url = f"ytsearch1:{search_query} audio"
+        fallback_file = await download_media(
+            yt_search_url,
+            fmt="audio",
+            quality="audio",
+            out_dir=out_dir,
+            audio_format=audio_format,
+            audio_quality=audio_quality,
+        )
+        if fallback_file and Path(fallback_file).exists():
+            thumb_bytes = fetch_thumb(meta.get("cover_url"))
+            embed_info = {
+                "title": title or Path(fallback_file).stem,
+                "uploader": artist or "Spotify",
+                "album": "Spotify",
+            }
+            embed_mp3_metadata(fallback_file, embed_info, thumb_bytes)
+            return fallback_file
+
+    # Step 3: Record detailed error cause if everything fails
+    err_detail = spotdl_stderr[:200] if spotdl_stderr else "SpotDL matching failed"
+    record_error(url, Exception(f"Spotify download failed. {err_detail}. YouTube fallback search failed for '{search_query}'."))
+    return None
 
 
 async def get_spotify_info(url: str) -> Optional[dict]:

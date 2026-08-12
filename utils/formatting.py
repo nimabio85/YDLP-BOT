@@ -50,7 +50,7 @@ def msg_start(username: str, max_mb: int, local_api: bool) -> str:
         f"I can download from:\n"
         f"  🔴 YouTube  •  🎵 Spotify\n"
         f"  📸 Instagram  •  🎶 SoundCloud\n"
-        f"  🐦 Twitter/X  •  📘 Facebook\n"
+        f"  📌 Pinterest  •  🐦 Twitter/X  •  📘 Facebook\n"
         f"  🎮 Twitch  •  🤖 Reddit  •  🎵 TikTok\n"
         f"  📁 PixelDrain/KrakenFiles  •  🌐 direct links\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -88,7 +88,7 @@ def msg_help(max_mb: int) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"*Supported Platforms*\n"
         f"  🔴 YouTube  🎵 Spotify  📸 Instagram\n"
-        f"  🐦 Twitter/X  📘 Facebook  🎶 SoundCloud\n"
+        f"  📌 Pinterest  🐦 Twitter/X  📘 Facebook  🎶 SoundCloud\n"
         f"  🎮 Twitch  🤖 Reddit  🎵 TikTok\n"
         f"  📁 PixelDrain/KrakenFiles  🌐 Direct file links\n"
         f"  plus most sites supported by yt-dlp\n\n"
@@ -110,6 +110,7 @@ def msg_video_card(info: dict, platform: str = "youtube") -> str:
         "youtube": "🔴", "spotify": "🎵", "soundcloud": "🎶",
         "instagram": "📸", "twitter": "🐦", "facebook": "📘",
         "twitch": "🎮", "reddit": "🤖", "tiktok": "🎵",
+        "pinterest": "📌",
     }
     icon = platform_icons.get(platform, "🌐")
 

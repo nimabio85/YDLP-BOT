@@ -8,5 +8,6 @@ Suggested filenames:
 - spotify.txt
 - twitter.txt
 - facebook.txt
+- pinterest.txt
 
 Do not commit real cookie files. They are ignored by .gitignore.

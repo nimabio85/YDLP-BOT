@@ -236,7 +236,7 @@ def is_short_video_link(platform: str, url: str) -> bool:
     if platform == "youtube" and "/shorts/" in url_lower:
         return True
     if platform == "instagram" and any(
-        p in url_lower for p in ("/reel/", "/reels/", "/p/", "/tv/", "/share/", "/stories/")
+        p in url_lower for p in ("/reel/", "/reels/")
     ):
         return True
     if platform == "facebook" and ("/reel/" in url_lower or "fb.watch" in url_lower):
@@ -386,7 +386,7 @@ VIDEO_ONLY_PLATFORMS = set()
 # Platforms that can be attempted through yt-dlp even when they are not named.
 UNSUPPORTED_PLATFORMS = set()
 # Platforms where image posts are common and we should warn
-IMAGE_PLATFORMS = {"instagram", "twitter", "reddit", "tiktok", "facebook"}
+IMAGE_PLATFORMS = {"instagram", "twitter", "reddit", "tiktok", "facebook", "pinterest"}
 SPOTIFY_COLLECTION_TYPES = {
     "playlist": "Playlist",
     "album": "Album",
@@ -461,6 +461,8 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
         ]
         if audio_quality and audio_quality != "0":
             cmd += ["--bitrate", f"{audio_quality}k"]
+        if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+            cmd += ["--client-id", SPOTIFY_CLIENT_ID, "--client-secret", SPOTIFY_CLIENT_SECRET]
         cookie_file = get_cookie_file("spotify")
         if cookie_file:
             cmd += ["--cookie-file", cookie_file]
