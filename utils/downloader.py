@@ -975,60 +975,163 @@ def gallery_dl_cmd() -> Optional[list[str]]:
         return None
 
 
+_IG_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def _instagram_shortcode_to_id(code: str) -> int:
+    num = 0
+    for char in code:
+        num = num * 64 + _IG_ALPHABET.index(char)
+    return num
+
+
+def _extract_instagram_shortcode(url: str) -> str:
+    m = re.search(r"/(?:p|reel|reels|tv|share/p|share/reel)/([^/?#&]+)", url)
+    return m.group(1) if m else ""
+
+
+async def download_instagram_direct(url: str, out_dir: str) -> list[str]:
+    """Native high-speed Instagram media downloader using web API and session cookies."""
+    code = _extract_instagram_shortcode(url)
+    if not code:
+        return []
+    try:
+        media_id = _instagram_shortcode_to_id(code)
+    except Exception:
+        return []
+
+    cookie_file = get_cookie_file("instagram")
+    if not cookie_file or not Path(cookie_file).exists():
+        return []
+
+    loop = asyncio.get_event_loop()
+
+    def _fetch():
+        import http.cookiejar
+        import json
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        cj = http.cookiejar.MozillaCookieJar(cookie_file)
+        try:
+            cj.load(ignore_discard=True, ignore_expires=True)
+        except Exception as err:
+            logger.warning(f"Could not load cookies for Instagram direct API: {err}")
+            return []
+
+        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+        req = urllib.request.Request(
+            f"https://www.instagram.com/api/v1/media/{media_id}/info/",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+                ),
+                "X-IG-App-ID": "936619743392459",
+                "X-Requested-With": "XMLHttpRequest",
+                "X-ASBD-ID": "129477",
+                "Sec-Fetch-Site": "same-origin",
+                "Accept": "*/*",
+            },
+        )
+        try:
+            with opener.open(req, timeout=15) as res:
+                data = json.loads(res.read().decode("utf-8"))
+        except Exception as e:
+            record_error(url, e)
+            logger.warning(f"Instagram direct API request failed: {e}")
+            return []
+
+        items = data.get("items", [])
+        if not items:
+            return []
+
+        item = items[0]
+        entries = item.get("carousel_media") or [item]
+        downloaded = []
+        for idx, entry in enumerate(entries, 1):
+            vids = entry.get("video_versions")
+            if vids:
+                dl_url = vids[0].get("url")
+                ext = "mp4"
+            else:
+                imgs = entry.get("image_versions2", {}).get("candidates", [])
+                dl_url = imgs[0].get("url") if imgs else None
+                ext = "jpg"
+            if not dl_url:
+                continue
+
+            dest = Path(out_dir) / f"{code}_{idx:02d}.{ext}"
+            try:
+                dl_req = urllib.request.Request(
+                    dl_url,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                with urllib.request.urlopen(dl_req, timeout=30) as r, open(dest, "wb") as f:
+                    f.write(r.read())
+                if dest.exists() and dest.stat().st_size > 0:
+                    downloaded.append(str(dest))
+            except Exception as e:
+                logger.warning(f"Failed to download Instagram item {idx}: {e}")
+
+        return downloaded
+
+    return await loop.run_in_executor(None, _fetch)
+
+
 async def download_image(url: str, out_dir: Optional[str] = None) -> list[str]:
-    """Download images using gallery-dl. Returns list of downloaded file paths."""
+    """Download images using direct Instagram API, gallery-dl, or Cobalt API."""
     import tempfile
 
-    base_cmd = gallery_dl_cmd()
-    if not base_cmd:
-        logger.error("gallery-dl is not installed; cannot use the gallery fallback. pip install gallery-dl")
-        return []
-
     target_dir = out_dir or tempfile.mkdtemp(dir=DOWNLOAD_PATH)
-    try:
-        loop = asyncio.get_event_loop()
-        def _dl():
-            cmd = base_cmd + [
-                "--dest", target_dir,
-                "--no-mtime",
-                "-q",
-            ]
-            cookie_file = get_cookie_file(url)
-            if cookie_file:
-                cmd += ["--cookies", cookie_file]
-            if PROXY_URL:
-                cmd += ["--proxy", PROXY_URL]
-            cmd.append(url)
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            logger.info(f"gallery-dl stdout: {result.stdout[:300]}")
-            if result.returncode != 0:
-                logger.error(f"gallery-dl stderr: {result.stderr[:300]}")
-                if result.stderr:
-                    record_error(url, Exception(result.stderr.strip()))
-            # Find all downloaded images/videos
-            valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mkv", ".mov", ".webm"}
-            files = [
-                p for p in Path(target_dir).rglob("*")
-                if p.is_file() and p.suffix.lower() in valid_exts
-            ]
-            return sorted(files)
 
-        downloaded_files = await loop.run_in_executor(None, _dl)
-        if downloaded_files:
-            return downloaded_files
+    # For Instagram, try fast native direct API first
+    if detect_platform(url) == "instagram":
+        ig_files = await download_instagram_direct(url, target_dir)
+        if ig_files:
+            return ig_files
 
-        # Fallback to Cobalt API if gallery-dl returned no files
-        fallback_file = await download_via_cobalt_api(url, target_dir)
-        if fallback_file:
-            return [fallback_file]
-        return []
-    except Exception as e:
-        record_error(url, e)
-        logger.error(f"gallery-dl failed: {e}")
-        fallback_file = await download_via_cobalt_api(url, target_dir)
-        if fallback_file:
-            return [fallback_file]
-        return []
+    base_cmd = gallery_dl_cmd()
+    if base_cmd:
+        try:
+            loop = asyncio.get_event_loop()
+
+            def _dl():
+                cmd = base_cmd + [
+                    "--dest", target_dir,
+                    "--no-mtime",
+                    "-q",
+                ]
+                cookie_file = get_cookie_file(url)
+                if cookie_file:
+                    cmd += ["--cookies", cookie_file]
+                if PROXY_URL:
+                    cmd += ["--proxy", PROXY_URL]
+                cmd.append(url)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                logger.info(f"gallery-dl stdout: {result.stdout[:300]}")
+                if result.returncode != 0:
+                    logger.error(f"gallery-dl stderr: {result.stderr[:300]}")
+                    if result.stderr:
+                        record_error(url, Exception(result.stderr.strip()))
+                # Find all downloaded images/videos
+                valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mkv", ".mov", ".webm"}
+                files = [
+                    p for p in Path(target_dir).rglob("*")
+                    if p.is_file() and p.suffix.lower() in valid_exts
+                ]
+                return sorted(files)
+
+            downloaded_files = await loop.run_in_executor(None, _dl)
+            if downloaded_files:
+                return downloaded_files
+        except Exception as e:
+            record_error(url, e)
+            logger.error(f"gallery-dl failed: {e}")
+
+    # Fallback to Cobalt API
+    fallback_file = await download_via_cobalt_api(url, target_dir)
+    if fallback_file:
+        return [fallback_file]
+    return []
 
 
 def embed_mp3_metadata(filepath: str, info: dict, thumb_bytes: Optional[bytes] = None):
