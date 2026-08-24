@@ -1003,6 +1003,8 @@ async def download_image(url: str, out_dir: Optional[str] = None) -> list[str]:
             logger.info(f"gallery-dl stdout: {result.stdout[:300]}")
             if result.returncode != 0:
                 logger.error(f"gallery-dl stderr: {result.stderr[:300]}")
+                if result.stderr:
+                    record_error(url, Exception(result.stderr.strip()))
             # Find all downloaded images/videos
             valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mkv", ".mov", ".webm"}
             files = [
@@ -1021,6 +1023,7 @@ async def download_image(url: str, out_dir: Optional[str] = None) -> list[str]:
             return [fallback_file]
         return []
     except Exception as e:
+        record_error(url, e)
         logger.error(f"gallery-dl failed: {e}")
         fallback_file = await download_via_cobalt_api(url, target_dir)
         if fallback_file:
