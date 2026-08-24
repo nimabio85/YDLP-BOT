@@ -29,7 +29,7 @@ from config import (
     ALLOWED_USERS, DOWNLOAD_PATH, LOCAL_API_URL,
     MAX_CONCURRENT_DOWNLOADS, MAX_DURATION_SECONDS, COOKIES_FILE,
     ENABLE_ARIA2, DATA_PATH, CACHE_TTL_DAYS, CACHE_MAX_ENTRIES,
-    AUTO_UPDATE_DEPS, UPDATE_INTERVAL_HOURS,
+    AUTO_UPDATE_DEPS, UPDATE_INTERVAL_HOURS, RESTRICT_GROUP_DOWNLOADS,
 )
 from utils.updater import update_dependencies
 from utils.downloader import (
@@ -120,9 +120,9 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 
 
 class AdaptedQuery:
-    def __init__(self, message):
+    def __init__(self, message, from_user=None):
         self.message = message
-        self.from_user = message.from_user
+        self.from_user = from_user or message.from_user
 
     async def edit_message_caption(self, caption, **kwargs):
         return await self.message.edit_caption(caption=caption, **kwargs)
@@ -228,6 +228,34 @@ def make_download_cache_key(
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def is_group_chat(update: Update) -> bool:
+    if not update or not update.effective_chat:
+        return False
+    return update.effective_chat.type in ("group", "supergroup", "channel")
+
+
+def is_allowed_group_media(platform: str, url: str, info: Optional[dict] = None) -> bool:
+    if not url:
+        return False
+    url_lower = url.lower()
+    if platform == "instagram":
+        return any(
+            p in url_lower for p in ("/p/", "/reel/", "/reels/", "/tv/", "/share/p/", "/share/reel/")
+        )
+    if platform == "tiktok":
+        return True
+    if platform == "youtube":
+        if "/shorts/" in url_lower:
+            return True
+        if info:
+            duration = info.get("duration") or 0
+            is_shorts = info.get("is_shorts") or False
+            if is_shorts or (0 < duration <= 60):
+                return True
+        return False
+    return False
+
+
 def is_short_video_link(platform: str, url: str) -> bool:
     if not url:
         return False
@@ -237,7 +265,7 @@ def is_short_video_link(platform: str, url: str) -> bool:
     if platform == "youtube" and "/shorts/" in url_lower:
         return True
     if platform == "instagram" and any(
-        p in url_lower for p in ("/reel/", "/reels/")
+        p in url_lower for p in ("/reel/", "/reels/", "/tv/", "/share/reel/")
     ):
         return True
     if platform == "facebook" and ("/reel/" in url_lower or "fb.watch" in url_lower):
@@ -1293,6 +1321,8 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         await update.message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
         return
+    if is_group_chat(update) and RESTRICT_GROUP_DOWNLOADS:
+        return
     query_text = " ".join(context.args) if context.args else ""
     if not query_text:
         await update.message.reply_text(
@@ -1311,6 +1341,8 @@ async def cmd_shazam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         await update.message.reply_text(msg_not_authorized(), parse_mode=ParseMode.MARKDOWN)
         return
+    if is_group_chat(update) and RESTRICT_GROUP_DOWNLOADS:
+        return
     await update.message.reply_text(
         "🎙️ *Music Finder (Shazam)*\n\n"
         "Send or forward a voice note, audio file, video, or video note, and I will try to identify the song for you!",
@@ -1321,6 +1353,9 @@ async def cmd_shazam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_media_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not message:
+        return
+
+    if is_group_chat(update) and RESTRICT_GROUP_DOWNLOADS:
         return
 
     if not is_allowed(update.effective_user.id):
@@ -1440,6 +1475,8 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = message.text or ""
     match = URL_RE.search(text)
     if not match:
+        if is_group_chat(update):
+            return
         await message.reply_text(
             "Send me a media link to download.\n\n"
             "Examples:\n"
@@ -1453,6 +1490,15 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     url = match.group(0)
     platform = detect_platform(url)
 
+    if is_group_chat(update) and RESTRICT_GROUP_DOWNLOADS:
+        if not is_allowed_group_media(platform, url):
+            if platform == "youtube":
+                info = await get_info(url)
+                if not info or not is_allowed_group_media(platform, url, info):
+                    return
+            else:
+                return
+
     await message.chat.send_action(ChatAction.TYPING)
 
     # Detect short videos (YouTube Shorts, TikTok, Instagram, FB reels) to download automatically in best quality
@@ -1461,7 +1507,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"⚡ *Processing {platform.title()}...*",
             parse_mode=ParseMode.MARKDOWN,
         )
-        adapted = AdaptedQuery(status_msg)
+        adapted = AdaptedQuery(status_msg, from_user=message.from_user)
         await handle_download(adapted, url, "video", "best", platform)
         return
 
@@ -1500,6 +1546,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         # Send as media group if multiple, single photo if one
                         from telegram import InputMediaPhoto, InputMediaVideo
                         web_title = await fetch_web_page_title(url) if url else None
+                        total_mb = sum(Path(f).stat().st_size for f in files if Path(f).is_file()) / (1024 * 1024)
                         if len(files) == 1:
                             fpath = files[0]
                             media_caption = build_final_caption(
@@ -1536,6 +1583,8 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                         media.append(InputMediaPhoto(media=data, caption=caption))
                                 await message.reply_media_group(media=media)
                         await msg.delete()
+                        add_history(message.from_user.id, f"{platform.title()} media", url, "media", total_mb, platform)
+                        record_download(message.from_user.id, "media", total_mb, True)
                     except Exception as e:
                         logger.error(f"Image send failed: {e}")
                         await msg.edit_text(
@@ -1613,6 +1662,9 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not message:
+        return
+
+    if is_group_chat(update):
         return
 
     if not is_allowed(update.effective_user.id):

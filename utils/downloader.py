@@ -126,11 +126,12 @@ def ydl_base_opts(extra: dict = None, url: str = "", minimal: bool = False) -> d
     if not minimal:
         if cookie_file:
             opts["cookiefile"] = cookie_file
-        # Explicit env override only — never clobber per-site cookies with the default file
-        import os
-        env_cookie = os.getenv('YT_DLP_COOKIE_FILE')
-        if env_cookie and os.path.exists(env_cookie):
-            opts['cookiefile'] = env_cookie
+        else:
+            # Fall back to general YT_DLP_COOKIE_FILE only if no per-site cookie was configured
+            import os
+            env_cookie = os.getenv('YT_DLP_COOKIE_FILE')
+            if env_cookie and os.path.exists(env_cookie):
+                opts['cookiefile'] = env_cookie
     else:
         opts["no_check_certificates"] = True
 
@@ -155,6 +156,10 @@ LOGIN_HINTS = (
     "http error 401",
     "http error 403",
     "bad request",
+    "no csrf token",
+    "locked behind the login page",
+    "redirect to login page",
+    "unable to extract shared data",
 )
 
 
@@ -175,6 +180,12 @@ def failure_reason(url: str) -> Optional[str]:
             "FFmpeg / FFprobe is not installed on the bot server.\n"
             "Please install `ffmpeg` on your server (`sudo apt update && sudo apt install -y ffmpeg` on Linux) "
             "or set `FFMPEG_LOCATION` in your `.env` file."
+        )
+    if "no video formats found" in err:
+        platform = detect_platform(url)
+        return (
+            f"No video streams found for this {platform.title()} post.\n"
+            "This post may be a photo, photo carousel, or requires valid session cookies in `cookies/{platform}.txt`."
         )
     if any(hint in err for hint in LOGIN_HINTS):
         platform = detect_platform(url)
@@ -992,10 +1003,12 @@ async def download_image(url: str, out_dir: Optional[str] = None) -> list[str]:
             logger.info(f"gallery-dl stdout: {result.stdout[:300]}")
             if result.returncode != 0:
                 logger.error(f"gallery-dl stderr: {result.stderr[:300]}")
-            # Find all downloaded images
-            files = []
-            for ext in ["jpg", "jpeg", "png", "webp", "gif", "mp4"]:
-                files += list(Path(target_dir).rglob(f"*.{ext}"))
+            # Find all downloaded images/videos
+            valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".mkv", ".mov", ".webm"}
+            files = [
+                p for p in Path(target_dir).rglob("*")
+                if p.is_file() and p.suffix.lower() in valid_exts
+            ]
             return sorted(files)
 
         downloaded_files = await loop.run_in_executor(None, _dl)

@@ -29,22 +29,40 @@ Path(DOWNLOAD_PATH).mkdir(parents=True, exist_ok=True)
 DATA_PATH: str = os.getenv("DATA_PATH", "data")
 Path(DATA_PATH).mkdir(parents=True, exist_ok=True)
 
-# ── Cookies ────────────────────────────────────────────────────────────────────
-_cookies = os.getenv("COOKIES_FILE", "cookies.txt")
-COOKIES_FILE: str = _cookies if Path(_cookies).exists() else ""
+BASE_DIR = Path(__file__).resolve().parent
 
-def _cookie_path(env_name: str) -> str:
+# ── Cookies ────────────────────────────────────────────────────────────────────
+def _resolve_path(path_str: str) -> str:
+    if not path_str:
+        return ""
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = BASE_DIR / p
+    return str(p) if p.exists() else ""
+
+_cookies = os.getenv("COOKIES_FILE", "cookies.txt")
+COOKIES_FILE: str = _resolve_path(_cookies)
+
+def _cookie_path(env_name: str, default_filename: str = "") -> str:
     value = os.getenv(env_name, "")
-    return value if value and Path(value).exists() else ""
+    if value:
+        resolved = _resolve_path(value)
+        if resolved:
+            return resolved
+    if default_filename:
+        resolved = _resolve_path(f"cookies/{default_filename}")
+        if resolved:
+            return resolved
+    return ""
 
 SITE_COOKIES: dict[str, str] = {
-    "youtube": _cookie_path("YOUTUBE_COOKIES_FILE"),
-    "instagram": _cookie_path("INSTAGRAM_COOKIES_FILE"),
-    "tiktok": _cookie_path("TIKTOK_COOKIES_FILE"),
-    "spotify": _cookie_path("SPOTIFY_COOKIES_FILE"),
-    "twitter": _cookie_path("TWITTER_COOKIES_FILE"),
-    "facebook": _cookie_path("FACEBOOK_COOKIES_FILE"),
-    "pinterest": _cookie_path("PINTEREST_COOKIES_FILE"),
+    "youtube": _cookie_path("YOUTUBE_COOKIES_FILE", "youtube.txt"),
+    "instagram": _cookie_path("INSTAGRAM_COOKIES_FILE", "instagram.txt"),
+    "tiktok": _cookie_path("TIKTOK_COOKIES_FILE", "tiktok.txt"),
+    "spotify": _cookie_path("SPOTIFY_COOKIES_FILE", "spotify.txt"),
+    "twitter": _cookie_path("TWITTER_COOKIES_FILE", "twitter.txt"),
+    "facebook": _cookie_path("FACEBOOK_COOKIES_FILE", "facebook.txt"),
+    "pinterest": _cookie_path("PINTEREST_COOKIES_FILE", "pinterest.txt"),
 }
 
 # ── Queue ──────────────────────────────────────────────────────────────────────
@@ -60,6 +78,7 @@ else:
 MAX_DURATION_SECONDS: int = int(os.getenv("MAX_DURATION_SECONDS", str(3 * 3600)))  # 3h
 CACHE_TTL_DAYS: int = int(os.getenv("CACHE_TTL_DAYS", "60"))
 CACHE_MAX_ENTRIES: int = int(os.getenv("CACHE_MAX_ENTRIES", "1000"))
+RESTRICT_GROUP_DOWNLOADS: bool = os.getenv("RESTRICT_GROUP_DOWNLOADS", "true").lower() in {"1", "true", "yes", "on"}
 
 # ── Spotify ────────────────────────────────────────────────────────────────────
 SPOTIFY_CLIENT_ID: str = os.getenv("SPOTIFY_CLIENT_ID", "")
