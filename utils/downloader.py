@@ -990,6 +990,46 @@ def _extract_instagram_shortcode(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def load_robust_cookie_jar(cookie_file: str):
+    """Load a CookieJar robustly from a Netscape cookie file, handling spaces, tabs, and #HttpOnly_ prefixes."""
+    import http.cookiejar
+    cj = http.cookiejar.MozillaCookieJar(cookie_file)
+    try:
+        cj.load(ignore_discard=True, ignore_expires=True)
+    except Exception:
+        pass
+
+    if not list(cj):
+        try:
+            with open(cookie_file, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            for line in lines:
+                line = line.strip()
+                if not line or (line.startswith("#") and not line.startswith("#HttpOnly_")):
+                    continue
+                if line.startswith("#HttpOnly_"):
+                    line = line[len("#HttpOnly_"):]
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    parts = line.split()
+                if len(parts) >= 7:
+                    domain, flag, path, secure, exp, name, value = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+                    try:
+                        expires = int(exp) if exp.isdigit() else None
+                    except Exception:
+                        expires = None
+                    ck = http.cookiejar.Cookie(
+                        version=0, name=name, value=value, port=None, port_specified=False,
+                        domain=domain, domain_specified=bool(domain.startswith(".")), domain_initial_dot=domain.startswith("."),
+                        path=path, path_specified=bool(path), secure=secure.lower() in ("true", "1"),
+                        expires=expires, discard=False, comment=None, comment_url=None, rest={}, rfc2109=False
+                    )
+                    cj.set_cookie(ck)
+        except Exception as e:
+            logger.warning(f"Fallback cookie parsing error for {cookie_file}: {e}")
+    return cj
+
+
 async def download_instagram_direct(url: str, out_dir: str) -> list[str]:
     """Native high-speed Instagram media downloader using web API and session cookies."""
     code = _extract_instagram_shortcode(url)
@@ -1007,30 +1047,41 @@ async def download_instagram_direct(url: str, out_dir: str) -> list[str]:
     loop = asyncio.get_event_loop()
 
     def _fetch():
-        import http.cookiejar
         import json
         Path(out_dir).mkdir(parents=True, exist_ok=True)
-        cj = http.cookiejar.MozillaCookieJar(cookie_file)
-        try:
-            cj.load(ignore_discard=True, ignore_expires=True)
-        except Exception as err:
-            logger.warning(f"Could not load cookies for Instagram direct API: {err}")
+        cj = load_robust_cookie_jar(cookie_file)
+        if not list(cj):
+            logger.warning(f"No cookies could be parsed from {cookie_file}")
             return []
 
-        opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+        csrf = ""
+        for c in cj:
+            if c.name == "csrftoken":
+                csrf = c.value
+                break
+
+        handlers = [urllib.request.HTTPCookieProcessor(cj)]
+        if PROXY_URL:
+            handlers.append(urllib.request.ProxyHandler({"http": PROXY_URL, "https": PROXY_URL}))
+        opener = urllib.request.build_opener(*handlers)
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+            ),
+            "X-IG-App-ID": "936619743392459",
+            "X-Requested-With": "XMLHttpRequest",
+            "X-ASBD-ID": "129477",
+            "Sec-Fetch-Site": "same-origin",
+            "Accept": "*/*",
+        }
+        if csrf:
+            headers["X-CSRFToken"] = csrf
+
         req = urllib.request.Request(
             f"https://www.instagram.com/api/v1/media/{media_id}/info/",
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
-                ),
-                "X-IG-App-ID": "936619743392459",
-                "X-Requested-With": "XMLHttpRequest",
-                "X-ASBD-ID": "129477",
-                "Sec-Fetch-Site": "same-origin",
-                "Accept": "*/*",
-            },
+            headers=headers,
         )
         try:
             with opener.open(req, timeout=15) as res:
