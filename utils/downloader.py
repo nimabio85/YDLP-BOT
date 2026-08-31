@@ -611,11 +611,11 @@ async def download_media(
         # then fall back to any container if mp4 streams are unavailable.
         # merge_output_format ensures the final file is always .mp4.
         quality_map = {
-            "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
-            "2160": "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
-            "1080": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-            "720":  "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "480":  "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]/best",
+            "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4][vcodec!=none]/best[vcodec!=none]",
+            "2160": "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=2160]+bestaudio/best[height<=2160][vcodec!=none]/best[vcodec!=none]",
+            "1080": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080][vcodec!=none]/best[vcodec!=none]",
+            "720":  "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720][vcodec!=none]/best[vcodec!=none]",
+            "480":  "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480][vcodec!=none]/best[vcodec!=none]",
         }
         opts = ydl_base_opts({
             "format": quality_map.get(quality, "best"),
@@ -640,15 +640,26 @@ async def download_media(
                 filename = ydl.prepare_filename(info)
                 if fmt == "audio":
                     filename = Path(filename).with_suffix(f".{audio_format}").as_posix()
-                if Path(filename).exists():
+                allowed_extensions = (
+                    {"mp3", "m4a", "flac", "wav", "ogg", "opus"}
+                    if fmt == "audio"
+                    else {"mp4", "mkv", "webm", "mov"}
+                )
+                if (
+                    Path(filename).exists()
+                    and Path(filename).suffix.lower().lstrip(".") in allowed_extensions
+                ):
                     return str(filename)
                 base = Path(filename).stem
-                matches = list(Path(out_dir).glob(f"{base}*"))
+                matches = [
+                    p for p in Path(out_dir).glob(f"{base}*")
+                    if p.is_file() and p.suffix.lower().lstrip(".") in allowed_extensions
+                ]
                 if matches:
                     return str(matches[0])
                 all_files = [
                     p for p in Path(out_dir).rglob("*")
-                    if p.is_file() and p.suffix.lower().lstrip(".") in {"mp3", "m4a", "flac", "wav", "ogg", "opus", "mp4", "mkv", "webm"}
+                    if p.is_file() and p.suffix.lower().lstrip(".") in allowed_extensions
                 ]
                 return str(all_files[0]) if all_files else filename
         return await loop.run_in_executor(None, _download)
@@ -659,7 +670,20 @@ async def download_media(
         logger.error(f"yt-dlp download failed: {e}. Trying API fallback...")
         cobalt_res = await download_via_cobalt_api(url, out_dir)
         if cobalt_res:
-            return cobalt_res
+            result_ext = Path(cobalt_res).suffix.lower().lstrip(".")
+            expected_extensions = (
+                {"mp3", "m4a", "flac", "wav", "ogg", "opus"}
+                if fmt == "audio"
+                else {"mp4", "mkv", "webm", "mov"}
+            )
+            if result_ext in expected_extensions:
+                return cobalt_res
+            record_error(
+                url,
+                Exception(
+                    f"Fallback returned .{result_ext or 'unknown'} media for a {fmt} request"
+                ),
+            )
         return None
 
 

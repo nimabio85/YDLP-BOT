@@ -37,7 +37,7 @@ from utils.downloader import (
     compress_video, fetch_thumb, embed_mp3_metadata, search_platform,
     download_image, download_direct_file, split_video, split_file, CANCELLED,
     get_cookie_file, extract_audio_cover, failure_reason,
-    fetch_web_page_title, clean_display_title,
+    fetch_web_page_title, clean_display_title, AUDIO_PLATFORMS,
 )
 from utils.formatting import (
     msg_start, msg_help, msg_video_card, msg_progress,
@@ -231,7 +231,7 @@ def make_download_cache_key(
 def is_group_chat(update: Update) -> bool:
     if not update or not update.effective_chat:
         return False
-    return update.effective_chat.type in ("group", "supergroup", "channel")
+    return update.effective_chat.type in ("group", "supergroup")
 
 
 def is_allowed_group_media(platform: str, url: str, info: Optional[dict] = None) -> bool:
@@ -271,6 +271,18 @@ def is_short_video_link(platform: str, url: str) -> bool:
     if platform == "facebook" and ("/reel/" in url_lower or "fb.watch" in url_lower):
         return True
     return False
+
+
+def media_group_batches(items: list[str], max_size: int = 10):
+    """Yield Telegram media-group batches, which must each contain 2-10 items."""
+    start = 0
+    while start < len(items):
+        remaining = len(items) - start
+        batch_size = max_size
+        if remaining == max_size + 1:
+            batch_size = max_size - 1
+        yield items[start:start + batch_size]
+        start += batch_size
 
 
 async def send_cached_download(query, cache_key: str, cached: dict) -> bool:
@@ -623,8 +635,7 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
                 sent = 1
             else:
                 # Send as grouped media albums in batches of 10 (Telegram max limit)
-                for i in range(0, len(valid_files), 10):
-                    batch = valid_files[i:i+10]
+                for batch_index, batch in enumerate(media_group_batches(valid_files)):
                     media_group = []
                     for j, fpath in enumerate(batch):
                         path = Path(fpath)
@@ -632,7 +643,7 @@ async def send_gallery_fallback(query, url: str, platform: str) -> bool:
                             data = f.read()
                         cap = (
                             final_caption(query, title=f"{platform.title()} media", platform=platform, url=url)
-                            if (i == 0 and j == 0) else None
+                            if (batch_index == 0 and j == 0) else None
                         )
                         if path.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv"}:
                             media_group.append(InputMediaVideo(media=data, caption=cap))
@@ -1489,8 +1500,9 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     url = match.group(0)
     platform = detect_platform(url)
+    group_chat = is_group_chat(update)
 
-    if is_group_chat(update) and RESTRICT_GROUP_DOWNLOADS:
+    if group_chat and RESTRICT_GROUP_DOWNLOADS:
         if not is_allowed_group_media(platform, url):
             if platform == "youtube":
                 info = await get_info(url)
@@ -1500,6 +1512,32 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return
 
     await message.chat.send_action(ChatAction.TYPING)
+
+    # Group links download immediately instead of showing an interactive format
+    # picker. Gallery-style platforms are tried first so photo posts and
+    # carousels are sent correctly; video/audio/file links use safe defaults.
+    if group_chat:
+        status_msg = await message.reply_text(
+            f"⚡ *Processing {platform.title()}...*",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        adapted = AdaptedQuery(status_msg, from_user=message.from_user)
+
+        if platform in IMAGE_PLATFORMS and not is_short_video_link(platform, url):
+            if await send_gallery_fallback(adapted, url, platform):
+                return
+
+        if platform in AUDIO_PLATFORMS:
+            audio_fmt = get_pref(message.from_user.id, "audio_format", "mp3")
+            audio_quality = get_pref(message.from_user.id, "audio_quality", "192")
+            await handle_download(
+                adapted, url, "audio", "audio", platform, audio_fmt, audio_quality
+            )
+        elif platform == "direct":
+            await handle_download(adapted, url, "document", "file", platform)
+        else:
+            await handle_download(adapted, url, "video", "best", platform)
+        return
 
     # Detect short videos (YouTube Shorts, TikTok, Instagram, FB reels) to download automatically in best quality
     if is_short_video_link(platform, url):
@@ -1562,8 +1600,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                     await message.reply_photo(photo=f, caption=media_caption)
                         else:
                             # Send in groups of 10 (Telegram limit)
-                            for i in range(0, len(files), 10):
-                                batch = files[i:i+10]
+                            for batch_index, batch in enumerate(media_group_batches(files)):
                                 media = []
                                 for j, fpath in enumerate(batch):
                                     with open(fpath, "rb") as f:
@@ -1575,7 +1612,7 @@ async def handle_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                                             platform=platform,
                                             url=url,
                                         )
-                                        if i == 0 and j == 0 else None
+                                        if batch_index == 0 and j == 0 else None
                                     )
                                     if str(fpath).endswith(".mp4"):
                                         media.append(InputMediaVideo(media=data, caption=caption))
@@ -2291,7 +2328,15 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler, block=False))
 
     logger.info("✅ Bot started.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # This bot supports private chats, groups, and supergroups—not channels.
+    # Excluding channel updates also prevents handlers from receiving channel
+    # posts, which do not necessarily have an effective_user.
+    allowed_updates = [
+        update_type
+        for update_type in Update.ALL_TYPES
+        if update_type not in {"channel_post", "edited_channel_post"}
+    ]
+    app.run_polling(allowed_updates=allowed_updates)
 
 
 if __name__ == "__main__":
