@@ -33,7 +33,7 @@ PLATFORM_DOMAINS = {
     "twitch": ["twitch.tv", "clips.twitch.tv"],
     "reddit": ["reddit.com", "v.redd.it"],
     "tiktok": ["tiktok.com"],
-    "spotify": ["open.spotify.com"],
+    "spotify": ["open.spotify.com", "spotify.link", "spotify.app.link"],
     "pinterest": ["pinterest.com", "pin.it"],
     "pixeldrain": ["pixeldrain.com"],
     "krakenfiles": ["krakenfiles.com"],
@@ -237,6 +237,25 @@ async def get_info(url: str) -> Optional[dict]:
     cached = _cached_info(url)
     if cached:
         return cached
+
+    # Spotify URL handling
+    if detect_platform(url) == "spotify":
+        s_meta = await fetch_spotify_metadata(url)
+        if s_meta and s_meta.get("title"):
+            info = {
+                "title": s_meta.get("title"),
+                "uploader": s_meta.get("artist") or "Spotify",
+                "channel": s_meta.get("artist") or "Spotify",
+                "artist": s_meta.get("artist"),
+                "album": s_meta.get("album"),
+                "thumbnail": s_meta.get("cover_url"),
+                "duration": int(s_meta.get("duration", 0)),
+                "webpage_url": url,
+                "extractor": "spotify",
+                "_spotify_meta": s_meta,
+            }
+            _cache_info(url, info)
+            return info
 
     loop = asyncio.get_event_loop()
 
@@ -687,42 +706,249 @@ async def download_media(
         return None
 
 
-async def fetch_spotify_track_metadata(url: str) -> dict:
-    """Fetch Spotify track title, artist, and thumbnail URL via oEmbed and page meta tags."""
+def resolve_spotify_url(url: str) -> str:
+    """Resolve short Spotify links (spotify.link / spotify.app.link) to full URLs."""
+    if not url:
+        return ""
+    if "spotify.link" in url or "spotify.app.link" in url:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.geturl()
+        except Exception as e:
+            logger.warning(f"Failed to resolve short Spotify link {url}: {e}")
+    return url
+
+
+def extract_spotify_type_and_id(url: str) -> tuple[Optional[str], Optional[str]]:
+    """Extract item type ('track', 'album', 'playlist', 'episode', 'show') and ID from a Spotify URL."""
+    if not url:
+        return None, None
+    resolved = resolve_spotify_url(url)
+    uri_match = re.search(r"spotify:(track|album|playlist|artist|episode|show):([a-zA-Z0-9]+)", resolved)
+    if uri_match:
+        return uri_match.group(1), uri_match.group(2)
+    url_match = re.search(r"spotify\.com/(?:intl-[a-z]+/)?(track|album|playlist|artist|episode|show)/([a-zA-Z0-9]+)", resolved)
+    if url_match:
+        return url_match.group(1), url_match.group(2)
+    return None, None
+
+
+async def fetch_spotify_metadata(url: str) -> dict:
+    """
+    Extract rich metadata from Spotify via the public Embed API (__NEXT_DATA__),
+    Client Credentials API, or oEmbed as fallback.
+    Returns dict:
+      title, artist, artists, album, duration (seconds), cover_url, release_year, track_list, type, id
+    """
     import json
-    meta = {"title": "", "artist": "", "cover_url": ""}
-    # 1. Try Spotify oEmbed endpoint
-    try:
-        oembed_url = f"https://open.spotify.com/oembed?url={url}"
-        req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read().decode("utf-8"))
-            meta["title"] = data.get("title", "")
-            meta["cover_url"] = data.get("thumbnail_url", "")
-    except Exception as e:
-        logger.warning(f"Spotify oEmbed fetch failed: {e}")
+    meta = {
+        "title": "",
+        "artist": "",
+        "artists": [],
+        "album": "",
+        "duration": 0.0,
+        "cover_url": "",
+        "release_year": "",
+        "track_list": [],
+        "type": "track",
+        "id": "",
+    }
+    resolved_url = resolve_spotify_url(url)
+    item_type, item_id = extract_spotify_type_and_id(resolved_url)
+    if not item_type or not item_id:
+        return meta
 
-    # 2. Try page meta tags for artist & title parsing
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            html = r.read().decode("utf-8", errors="ignore")
-            title_match = re.search(r'<meta property="og:title" content="([^"]+)"', html)
-            desc_match = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+    meta["type"] = item_type
+    meta["id"] = item_id
 
-            if title_match and not meta["title"]:
-                meta["title"] = title_match.group(1)
+    loop = asyncio.get_event_loop()
 
-            if desc_match:
-                desc = desc_match.group(1)
-                # og:description format: "Artist · Album · Song · Year"
-                parts = [p.strip() for p in desc.split("·") if p.strip()]
-                if parts:
-                    meta["artist"] = parts[0]
-    except Exception as e:
-        logger.warning(f"Spotify page meta fetch failed: {e}")
+    # Strategy 1: Spotify Embed API (__NEXT_DATA__)
+    def _fetch_embed():
+        embed_url = f"https://open.spotify.com/embed/{item_type}/{item_id}"
+        req = urllib.request.Request(
+            embed_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=12) as r:
+                html = r.read().decode("utf-8", errors="ignore")
+                next_data_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">([^<]+)</script>', html)
+                if next_data_match:
+                    return json.loads(next_data_match.group(1))
+        except Exception as e:
+            logger.debug(f"Spotify embed metadata fetch failed for {embed_url}: {e}")
+        return None
+
+    next_data = await loop.run_in_executor(None, _fetch_embed)
+    if next_data:
+        try:
+            state_data = next_data.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {})
+            entity = state_data.get("entity", {})
+            if entity and (entity.get("name") or entity.get("title")):
+                meta["title"] = entity.get("name") or entity.get("title") or ""
+                artist_objs = entity.get("artists", [])
+                meta["artists"] = [a.get("name") for a in artist_objs if a.get("name")]
+                if meta["artists"]:
+                    meta["artist"] = ", ".join(meta["artists"])
+                else:
+                    meta["artist"] = entity.get("subtitle") or entity.get("subtitleText") or ""
+
+                album_obj = entity.get("album")
+                meta["album"] = (album_obj.get("name") if isinstance(album_obj, dict) else None) or entity.get("albumName") or ""
+                dur_ms = entity.get("duration") or entity.get("duration_ms") or 0
+                meta["duration"] = float(dur_ms) / 1000.0 if dur_ms else 0.0
+
+                img_sources = (
+                    entity.get("visualIdentity", {}).get("image", []) if isinstance(entity.get("visualIdentity"), dict) else []
+                ) or (
+                    entity.get("coverArt", {}).get("sources", []) if isinstance(entity.get("coverArt"), dict) else []
+                ) or entity.get("images", [])
+                if img_sources and isinstance(img_sources, list):
+                    meta["cover_url"] = img_sources[0].get("url", "") if isinstance(img_sources[0], dict) else ""
+
+                rel_date_obj = entity.get("releaseDate")
+                if isinstance(rel_date_obj, dict):
+                    rel_date = rel_date_obj.get("isoString", "")
+                elif isinstance(rel_date_obj, str):
+                    rel_date = rel_date_obj
+                else:
+                    rel_date = entity.get("release_date", "")
+                if rel_date:
+                    meta["release_year"] = str(rel_date)[:4]
+
+                raw_track_list = entity.get("trackList") or (entity.get("tracks", {}).get("items", []) if isinstance(entity.get("tracks"), dict) else [])
+                if isinstance(raw_track_list, list):
+                    for t in raw_track_list:
+                        if not t or not isinstance(t, dict):
+                            continue
+                        t_title = t.get("title") or t.get("name") or ""
+                        t_sub = t.get("subtitle") or ""
+                        t_art_objs = t.get("artists")
+                        t_artists = [a.get("name") for a in t_art_objs if isinstance(a, dict) and a.get("name")] if isinstance(t_art_objs, list) else []
+                        t_artist = ", ".join(t_artists) if t_artists else (t_sub or meta["artist"])
+                        t_dur_ms = t.get("duration") or t.get("duration_ms") or 0
+                        t_dur = float(t_dur_ms) / 1000.0 if t_dur_ms else 0.0
+                        t_cover = meta["cover_url"]
+                        t_uri = t.get("uri") or ""
+                        meta["track_list"].append({
+                            "title": t_title,
+                            "artist": t_artist,
+                            "artists": t_artists or ([t_artist] if t_artist else []),
+                            "duration": t_dur,
+                            "album": meta["album"] or meta["title"],
+                            "cover_url": t_cover,
+                            "uri": t_uri,
+                        })
+
+                if meta["title"]:
+                    return meta
+        except Exception as e:
+            logger.warning(f"Error parsing Spotify NEXT_DATA: {e}")
+
+    # Strategy 2: Official Spotify Web API if Client ID and Secret are configured
+    from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+    if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+        def _fetch_api():
+            try:
+                import base64
+                auth_str = f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}"
+                auth_b64 = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+                token_req = urllib.request.Request(
+                    "https://accounts.spotify.com/api/token",
+                    data=b"grant_type=client_credentials",
+                    headers={
+                        "Authorization": f"Basic {auth_b64}",
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    }
+                )
+                with urllib.request.urlopen(token_req, timeout=10) as tr:
+                    t_data = json.loads(tr.read().decode("utf-8"))
+                    access_token = t_data.get("access_token")
+                if not access_token:
+                    return None
+
+                endpoint_map = {
+                    "track": f"https://api.spotify.com/v1/tracks/{item_id}",
+                    "album": f"https://api.spotify.com/v1/albums/{item_id}",
+                    "playlist": f"https://api.spotify.com/v1/playlists/{item_id}",
+                    "episode": f"https://api.spotify.com/v1/episodes/{item_id}",
+                }
+                api_url = endpoint_map.get(item_type)
+                if not api_url:
+                    return None
+                req = urllib.request.Request(api_url, headers={"Authorization": f"Bearer {access_token}"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return json.loads(r.read().decode("utf-8"))
+            except Exception as e:
+                logger.warning(f"Spotify Web API call failed: {e}")
+                return None
+
+        api_res = await loop.run_in_executor(None, _fetch_api)
+        if api_res:
+            try:
+                meta["title"] = api_res.get("name", "")
+                artists = [a["name"] for a in api_res.get("artists", []) if "name" in a]
+                meta["artists"] = artists
+                meta["artist"] = ", ".join(artists)
+                meta["album"] = api_res.get("album", {}).get("name", "") or (api_res.get("name") if item_type == "album" else "")
+                meta["duration"] = (api_res.get("duration_ms") or 0) / 1000.0
+                images = api_res.get("images") or api_res.get("album", {}).get("images", [])
+                if images:
+                    meta["cover_url"] = images[0].get("url", "")
+                rel = api_res.get("release_date") or api_res.get("album", {}).get("release_date", "")
+                if rel:
+                    meta["release_year"] = str(rel)[:4]
+
+                items = api_res.get("tracks", {}).get("items", [])
+                for it in items:
+                    tr = it.get("track", it)
+                    if not tr:
+                        continue
+                    t_title = tr.get("name", "")
+                    t_artists = [a["name"] for a in tr.get("artists", []) if "name" in a]
+                    meta["track_list"].append({
+                        "title": t_title,
+                        "artist": ", ".join(t_artists),
+                        "artists": t_artists,
+                        "duration": (tr.get("duration_ms") or 0) / 1000.0,
+                        "album": meta["album"],
+                        "cover_url": meta["cover_url"],
+                        "uri": tr.get("uri", ""),
+                    })
+                return meta
+            except Exception as e:
+                logger.warning(f"Error parsing Spotify Web API response: {e}")
+
+    # Strategy 3: oEmbed fallback
+    def _fetch_oembed():
+        try:
+            oembed_url = f"https://open.spotify.com/oembed?url={resolved_url}"
+            req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    oembed_data = await loop.run_in_executor(None, _fetch_oembed)
+    if oembed_data:
+        meta["title"] = meta["title"] or oembed_data.get("title", "")
+        meta["cover_url"] = meta["cover_url"] or oembed_data.get("thumbnail_url", "")
 
     return meta
+
+
+async def fetch_spotify_track_metadata(url: str) -> dict:
+    """Backward-compatible alias for fetch_spotify_metadata."""
+    return await fetch_spotify_metadata(url)
 
 
 def is_raw_machine_id(text: str) -> bool:
@@ -776,65 +1002,267 @@ async def fetch_web_page_title(url: str) -> Optional[str]:
         return None
 
 
+def score_youtube_match(
+    candidate: dict,
+    target_artist: str,
+    target_title: str,
+    target_duration: float = 0.0,
+    artists_list: Optional[list[str]] = None,
+) -> float:
+    """
+    Score a YouTube candidate against the target Spotify track.
+    Higher score means better match.
+    """
+    cand_title = (candidate.get("title") or "").lower()
+    cand_channel = (candidate.get("uploader") or candidate.get("channel") or "").lower()
+    cand_dur = float(candidate.get("duration") or 0)
+
+    score = 0.0
+    t_artist = target_artist.lower().strip()
+    t_title = target_title.lower().strip()
+    all_artists = [a.lower().strip() for a in (artists_list or []) if a]
+    if t_artist and t_artist not in all_artists:
+        all_artists.append(t_artist)
+
+    # 1. Artist Matching (+35 to channel, +25 to title)
+    artist_matched = False
+    for a in all_artists:
+        if a and a in cand_channel:
+            score += 35.0
+            artist_matched = True
+            break
+    for a in all_artists:
+        if a and a in cand_title:
+            score += 25.0
+            artist_matched = True
+            break
+
+    # 2. Official / Topic / VEVO Channel Boost
+    if "- topic" in cand_channel:
+        score += 45.0  # Official YouTube Music studio release
+    elif "vevo" in cand_channel:
+        score += 35.0
+    elif "official" in cand_channel or artist_matched:
+        score += 15.0
+
+    # 3. Title Word Matching
+    clean_target = re.sub(r'[\(\[\{\)\}\]\-\:\,\.\'\"\/\\]', ' ', t_title)
+    target_words = [w for w in clean_target.split() if len(w) > 1 and w not in {"feat", "ft", "with", "the", "a", "an", "and", "in", "on", "of"}]
+    if target_words:
+        clean_cand = re.sub(r'[\(\[\{\)\}\]\-\:\,\.\'\"\/\\]', ' ', cand_title)
+        cand_words = set(clean_cand.split())
+        matched_count = sum(1 for w in target_words if w in cand_words)
+        score += (matched_count / len(target_words)) * 45.0
+
+    # 4. Duration Proximity (Crucial for music accuracy)
+    if target_duration > 0 and cand_dur > 0:
+        dur_diff = abs(cand_dur - target_duration)
+        if dur_diff <= 2:
+            score += 50.0
+        elif dur_diff <= 5:
+            score += 40.0
+        elif dur_diff <= 10:
+            score += 25.0
+        elif dur_diff <= 20:
+            score += 10.0
+        elif dur_diff > 60:
+            score -= 60.0  # Likely a podcast, interview, or compilation
+        elif dur_diff > 30:
+            score -= 30.0  # Likely extended mix or music video dialogue
+
+    # 5. Negative Keyword Penalties (unless present in target)
+    bad_terms = [
+        "cover", "remix", "live", "acoustic", "karaoke", "instrumental",
+        "slowed", "reverb", "nightcore", "8d audio", "bass boosted",
+        "1 hour", "10 hour", "reaction", "guitar cover", "piano tutorial",
+        "parody", "clean version", "drum cover", "extended"
+    ]
+    for term in bad_terms:
+        if term in cand_title and term not in t_title:
+            score -= 40.0
+
+    # 6. Positive Keyword Boosts
+    if "official audio" in cand_title:
+        score += 15.0
+    elif "official music video" in cand_title or "official video" in cand_title:
+        score += 10.0
+
+    return score
+
+
+async def find_best_youtube_match(
+    artist: str,
+    title: str,
+    duration: float = 0.0,
+    artists_list: Optional[list[str]] = None,
+) -> Optional[dict]:
+    """
+    Search YouTube with multiple targeted query formulations and return
+    the highest-scoring candidate matching the Spotify track.
+    """
+    primary_artist = (artists_list[0] if artists_list else "") or (artist.split(",")[0] if artist else "")
+    clean_title = re.sub(r'\(feat\.[^\)]+\)|\(with[^\)]+\)', '', title, flags=re.IGNORECASE).strip()
+
+    search_queries = []
+    if primary_artist and clean_title:
+        search_queries.append(f"{primary_artist} - {clean_title} Topic")
+        search_queries.append(f"{primary_artist} - {clean_title} Official Audio")
+        search_queries.append(f"{artist} - {title}")
+        search_queries.append(f"{primary_artist} {clean_title}")
+    elif title:
+        search_queries.append(f"{title} Official Audio")
+        search_queries.append(f"{title}")
+
+    opts = ydl_base_opts({"skip_download": True, "extract_flat": True})
+    candidates = []
+    seen_ids = set()
+
+    loop = asyncio.get_event_loop()
+
+    def _search():
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            for q in search_queries[:3]:
+                try:
+                    res = ydl.extract_info(f"ytsearch5:{q}", download=False)
+                    for entry in (res.get("entries") or []):
+                        if not entry:
+                            continue
+                        vid_id = entry.get("id") or entry.get("url")
+                        if vid_id and vid_id not in seen_ids:
+                            seen_ids.add(vid_id)
+                            candidates.append(entry)
+                except Exception as e:
+                    logger.debug(f"yt-dlp search error for '{q}': {e}")
+        return candidates
+
+    found_candidates = await loop.run_in_executor(None, _search)
+    if not found_candidates:
+        return None
+
+    scored = [
+        (score_youtube_match(c, artist, title, duration, artists_list), c)
+        for c in found_candidates
+    ]
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    best_score, best_candidate = scored[0]
+    logger.info(
+        f"Spotify match best score: {best_score:.1f} for '{title}' by '{artist}' -> "
+        f"'{best_candidate.get('title')}' by '{best_candidate.get('uploader')}' ({best_candidate.get('duration')}s)"
+    )
+    return best_candidate
+
+
 async def download_spotify(
     url: str,
     out_dir: str,
     audio_format: str = "mp3",
     audio_quality: str = "192",
+    progress_callback: Optional[Callable] = None,
+    cancel_event=None,
 ) -> Optional[str]:
-    """Download Spotify track via spotdl with fallback to YouTube search + ID3 metadata embedding."""
+    """
+    Download Spotify track with high precision:
+    1. Extracts full metadata (title, artist, album, duration, cover).
+    2. Tries SpotDL CLI if available.
+    3. Falls back to multi-factor YouTube Music / YouTube scoring & download.
+    4. Embeds full ID3/Vorbis/MP4 metadata & cover art into the final file.
+    """
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     from config import SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
     spotdl_stderr = ""
 
-    # Step 1: Try SpotDL CLI
-    try:
-        loop = asyncio.get_event_loop()
-        def _dl():
-            cmd = [
-                shutil.which("spotdl") or "spotdl", url,
-                "--output", out_dir,
-                "--format", audio_format,
-            ]
-            if audio_quality and audio_quality != "0":
-                cmd += ["--bitrate", f"{audio_quality}k"]
-            if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-                cmd += ["--client-id", SPOTIFY_CLIENT_ID, "--client-secret", SPOTIFY_CLIENT_SECRET]
-            cookie_file = get_cookie_file("spotify")  # Returns YouTube cookie file for yt-dlp
-            if cookie_file:
-                cmd += ["--cookie-file", cookie_file]
-            if PROXY_URL:
-                cmd += ["--proxy", PROXY_URL]
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if result.returncode != 0:
-                logger.error(f"spotdl error: {result.stderr[:300]}")
-                return None, result.stderr
-
-            matches = list(Path(out_dir).rglob(f"*.{audio_format}"))
-            if not matches:
-                matches = [
-                    p for p in Path(out_dir).rglob("*")
-                    if p.is_file() and p.suffix.lower().lstrip(".") in {"mp3", "m4a", "opus", "flac", "wav"}
-                ]
-            return (str(matches[0]), "") if matches else (None, "SpotDL generated no audio file")
-
-        file_path, spotdl_stderr = await loop.run_in_executor(None, _dl)
-        if file_path and Path(file_path).exists():
-            return file_path
-    except Exception as e:
-        spotdl_stderr = str(e)
-        logger.error(f"Spotify spotdl execution failed: {e}")
-
-    # Step 2: Fallback — Fetch track metadata and search YouTube
-    logger.info("SpotDL download unsuccessful. Falling back to YouTube search for Spotify track...")
-    meta = await fetch_spotify_track_metadata(url)
+    # Step 1: Fetch rich Spotify metadata first
+    meta = await fetch_spotify_metadata(url)
     title = meta.get("title", "")
     artist = meta.get("artist", "")
-    search_query = f"{artist} - {title}" if (artist and title) else (title or artist)
+    album = meta.get("album", "") or title
+    duration = meta.get("duration", 0.0)
+    cover_url = meta.get("cover_url", "")
+    thumb_bytes = fetch_thumb(cover_url) if cover_url else None
 
+    # Step 2: Try SpotDL CLI if installed and binary is found
+    spotdl_bin = shutil.which("spotdl")
+    if spotdl_bin:
+        try:
+            loop = asyncio.get_event_loop()
+            def _dl_spotdl():
+                cmd = [
+                    spotdl_bin, url,
+                    "--output", out_dir,
+                    "--format", audio_format,
+                ]
+                if audio_quality and audio_quality != "0":
+                    cmd += ["--bitrate", f"{audio_quality}k"]
+                if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+                    cmd += ["--client-id", SPOTIFY_CLIENT_ID, "--client-secret", SPOTIFY_CLIENT_SECRET]
+                cookie_file = get_cookie_file("spotify")
+                if cookie_file:
+                    cmd += ["--cookie-file", cookie_file]
+                if PROXY_URL:
+                    cmd += ["--proxy", PROXY_URL]
+
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                if result.returncode != 0:
+                    logger.warning(f"spotdl failed: {result.stderr[:300]}")
+                    return None, result.stderr
+
+                matches = list(Path(out_dir).rglob(f"*.{audio_format}"))
+                if not matches:
+                    matches = [
+                        p for p in Path(out_dir).rglob("*")
+                        if p.is_file() and p.suffix.lower().lstrip(".") in {"mp3", "m4a", "opus", "flac", "wav"}
+                    ]
+                return (str(matches[0]), "") if matches else (None, "SpotDL generated no file")
+
+            file_path, spotdl_stderr = await loop.run_in_executor(None, _dl_spotdl)
+            if file_path and Path(file_path).exists() and Path(file_path).stat().st_size > 1000:
+                embed_audio_metadata(file_path, {
+                    "title": title or Path(file_path).stem,
+                    "artist": artist,
+                    "album": album,
+                    "release_year": meta.get("release_year"),
+                }, thumb_bytes)
+                return file_path
+        except Exception as e:
+            spotdl_stderr = str(e)
+            logger.warning(f"SpotDL execution error: {e}")
+
+    # Step 3: High-Precision YouTube / YouTube Music Matcher & Downloader
+    logger.info(f"Using high-precision YouTube matcher for Spotify track: '{title}' by '{artist}' ({duration:.1f}s)...")
+    best_candidate = await find_best_youtube_match(
+        artist=artist,
+        title=title,
+        duration=duration,
+        artists_list=meta.get("artists", []),
+    )
+
+    if best_candidate:
+        vid_url = best_candidate.get("webpage_url") or best_candidate.get("url") or f"https://www.youtube.com/watch?v={best_candidate.get('id')}"
+        fallback_file = await download_media(
+            vid_url,
+            fmt="audio",
+            quality="audio",
+            out_dir=out_dir,
+            audio_format=audio_format,
+            audio_quality=audio_quality,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
+        )
+        if fallback_file and Path(fallback_file).exists():
+            embed_info = {
+                "title": title or Path(fallback_file).stem,
+                "artist": artist or "Spotify",
+                "album": album or "Spotify",
+                "release_year": meta.get("release_year"),
+            }
+            embed_audio_metadata(fallback_file, embed_info, thumb_bytes)
+            return fallback_file
+
+    # Step 4: Ultimate fallback to plain search
+    search_query = f"{artist} - {title}" if (artist and title) else (title or artist)
     if search_query:
-        yt_search_url = f"ytsearch1:{search_query} audio"
+        yt_search_url = f"ytsearch1:{search_query} Official Audio"
         fallback_file = await download_media(
             yt_search_url,
             fmt="audio",
@@ -842,37 +1270,36 @@ async def download_spotify(
             out_dir=out_dir,
             audio_format=audio_format,
             audio_quality=audio_quality,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event,
         )
         if fallback_file and Path(fallback_file).exists():
-            thumb_bytes = fetch_thumb(meta.get("cover_url"))
             embed_info = {
                 "title": title or Path(fallback_file).stem,
-                "uploader": artist or "Spotify",
-                "album": "Spotify",
+                "artist": artist or "Spotify",
+                "album": album or "Spotify",
+                "release_year": meta.get("release_year"),
             }
-            embed_mp3_metadata(fallback_file, embed_info, thumb_bytes)
+            embed_audio_metadata(fallback_file, embed_info, thumb_bytes)
             return fallback_file
 
-    # Step 3: Record detailed error cause if everything fails
-    err_detail = spotdl_stderr[:200] if spotdl_stderr else "SpotDL matching failed"
-    record_error(url, Exception(f"Spotify download failed. {err_detail}. YouTube fallback search failed for '{search_query}'."))
+    err_detail = spotdl_stderr[:200] if spotdl_stderr else "Track matching failed"
+    record_error(url, Exception(f"Spotify download failed. {err_detail}. Could not find match for '{title}' by '{artist}'."))
     return None
 
 
 async def get_spotify_info(url: str) -> Optional[dict]:
-    """Get Spotify track info via spotdl."""
-    try:
-        loop = asyncio.get_event_loop()
-        def _info():
-            result = subprocess.run(
-                ["spotdl", "--print-errors", url, "--output", "/tmp"],
-                capture_output=True, text=True, timeout=30
-            )
-            return result.stdout
-        await loop.run_in_executor(None, _info)
-        return None  # spotdl doesn't easily return structured info; use yt_dlp for preview
-    except Exception:
-        return None
+    """Get Spotify track info."""
+    meta = await fetch_spotify_metadata(url)
+    if meta and meta.get("title"):
+        return {
+            "title": meta.get("title"),
+            "uploader": meta.get("artist") or "Spotify",
+            "thumbnail": meta.get("cover_url"),
+            "duration": int(meta.get("duration", 0)),
+            "_spotify_meta": meta,
+        }
+    return None
 
 
 def compress_video(input_path: str, output_path: str, target_mb: int = 1900) -> bool:
@@ -1209,24 +1636,102 @@ async def download_image(url: str, out_dir: Optional[str] = None) -> list[str]:
     return []
 
 
-def embed_mp3_metadata(filepath: str, info: dict, thumb_bytes: Optional[bytes] = None):
+def embed_audio_metadata(filepath: str, info: dict, thumb_bytes: Optional[bytes] = None):
+    """Embed Title, Artist, Album, Year, and Cover Art into MP3, M4A, FLAC, OGG, OPUS files."""
+    if not filepath or not Path(filepath).exists():
+        return
+    path = Path(filepath)
+    ext = path.suffix.lower().lstrip(".")
+    title = info.get("title") or path.stem
+    artist = info.get("artist") or info.get("uploader") or info.get("channel") or ""
+    album = info.get("album") or info.get("title") or ""
+    year = str(info.get("release_year") or info.get("upload_date", "")[:4] or "")
+
     try:
-        from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC, APIC, ID3NoHeaderError
-        try:
-            tags = ID3(filepath)
-        except ID3NoHeaderError:
-            tags = ID3()
-        tags["TIT2"] = TIT2(encoding=3, text=info.get("title", ""))
-        tags["TPE1"] = TPE1(encoding=3, text=info.get("uploader") or info.get("channel") or "")
-        tags["TALB"] = TALB(encoding=3, text=info.get("album") or info.get("title") or "")
-        upload_date = info.get("upload_date", "")
-        if upload_date:
-            tags["TDRC"] = TDRC(encoding=3, text=upload_date[:4])
-        if thumb_bytes:
-            tags["APIC"] = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=thumb_bytes)
-        tags.save(filepath, v2_version=3)
+        if ext == "mp3":
+            from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC, APIC, ID3NoHeaderError
+            try:
+                tags = ID3(str(path))
+            except ID3NoHeaderError:
+                tags = ID3()
+            if title:
+                tags["TIT2"] = TIT2(encoding=3, text=title)
+            if artist:
+                tags["TPE1"] = TPE1(encoding=3, text=artist)
+            if album:
+                tags["TALB"] = TALB(encoding=3, text=album)
+            if year:
+                tags["TDRC"] = TDRC(encoding=3, text=year)
+            if thumb_bytes:
+                tags["APIC"] = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=thumb_bytes)
+            tags.save(str(path), v2_version=3)
+
+        elif ext == "m4a":
+            from mutagen.mp4 import MP4, MP4Cover
+            audio = MP4(str(path))
+            if title:
+                audio["\xa9nam"] = [title]
+            if artist:
+                audio["\xa9ART"] = [artist]
+            if album:
+                audio["\xa9alb"] = [album]
+            if year:
+                audio["\xa9day"] = [year]
+            if thumb_bytes:
+                image_format = MP4Cover.FORMAT_PNG if thumb_bytes.startswith(b'\x89PNG') else MP4Cover.FORMAT_JPEG
+                audio["covr"] = [MP4Cover(thumb_bytes, imageformat=image_format)]
+            audio.save()
+
+        elif ext == "flac":
+            from mutagen.flac import FLAC, Picture
+            audio = FLAC(str(path))
+            if title:
+                audio["title"] = title
+            if artist:
+                audio["artist"] = artist
+            if album:
+                audio["album"] = album
+            if year:
+                audio["date"] = year
+            if thumb_bytes:
+                pic = Picture()
+                pic.type = 3
+                pic.mime = "image/png" if thumb_bytes.startswith(b'\x89PNG') else "image/jpeg"
+                pic.desc = "Cover"
+                pic.data = thumb_bytes
+                audio.clear_pictures()
+                audio.add_picture(pic)
+            audio.save()
+
+        elif ext in ("ogg", "opus"):
+            import base64
+            from mutagen.flac import Picture
+            from mutagen.oggvorbis import OggVorbis
+            from mutagen.oggopus import OggOpus
+            audio = OggOpus(str(path)) if ext == "opus" else OggVorbis(str(path))
+            if title:
+                audio["title"] = [title]
+            if artist:
+                audio["artist"] = [artist]
+            if album:
+                audio["album"] = [album]
+            if year:
+                audio["date"] = [year]
+            if thumb_bytes:
+                pic = Picture()
+                pic.type = 3
+                pic.mime = "image/png" if thumb_bytes.startswith(b'\x89PNG') else "image/jpeg"
+                pic.desc = "Cover"
+                pic.data = thumb_bytes
+                audio["metadata_block_picture"] = [base64.b64encode(pic.write()).decode("ascii")]
+            audio.save()
     except Exception as e:
-        logger.warning(f"Metadata embed failed: {e}")
+        logger.warning(f"Audio metadata tagging failed for {filepath}: {e}")
+
+
+def embed_mp3_metadata(filepath: str, info: dict, thumb_bytes: Optional[bytes] = None):
+    """Backward-compatible alias for embed_audio_metadata."""
+    return embed_audio_metadata(filepath, info, thumb_bytes)
 
 
 def extract_audio_cover(filepath: str) -> bytes | None:

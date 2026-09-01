@@ -34,6 +34,7 @@ from config import (
 from utils.updater import update_dependencies
 from utils.downloader import (
     detect_platform, get_info, download_media, download_spotify,
+    fetch_spotify_metadata, find_best_youtube_match, embed_audio_metadata,
     compress_video, fetch_thumb, embed_mp3_metadata, search_platform,
     download_image, download_direct_file, split_video, split_file, CANCELLED,
     get_cookie_file, extract_audio_cover, failure_reason,
@@ -495,62 +496,144 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
     )
 
     with tempfile.TemporaryDirectory(dir=DOWNLOAD_PATH) as tmpdir:
-        cmd = [
-            SPOTDL_BIN, url,
-            "--output", tmpdir,
-            "--format", audio_format,
-        ]
-        if audio_quality and audio_quality != "0":
-            cmd += ["--bitrate", f"{audio_quality}k"]
-        if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
-            cmd += ["--client-id", SPOTIFY_CLIENT_ID, "--client-secret", SPOTIFY_CLIENT_SECRET]
-        cookie_file = get_cookie_file("spotify")
-        if cookie_file:
-            cmd += ["--cookie-file", cookie_file]
+        files = []
+        # Try spotdl if installed
+        if shutil.which("spotdl"):
+            cmd = [
+                SPOTDL_BIN, url,
+                "--output", tmpdir,
+                "--format", audio_format,
+            ]
+            if audio_quality and audio_quality != "0":
+                cmd += ["--bitrate", f"{audio_quality}k"]
+            if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+                cmd += ["--client-id", SPOTIFY_CLIENT_ID, "--client-secret", SPOTIFY_CLIENT_SECRET]
+            cookie_file = get_cookie_file("spotify")
+            if cookie_file:
+                cmd += ["--cookie-file", cookie_file]
 
-        try:
-            proc = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-            )
-        except subprocess.TimeoutExpired:
-            await safe_edit(query, "❌ *Playlist timed out.*\n\nTry with a smaller playlist or single tracks.")
+            try:
+                proc = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+                )
+                for ext in [audio_format, "mp3", "m4a", "opus", "flac", "wav"]:
+                    files = sorted(Path(tmpdir).rglob(f"*.{ext}"))
+                    if files:
+                        break
+            except subprocess.TimeoutExpired:
+                await safe_edit(query, "❌ *Playlist timed out.*\n\nTry with a smaller playlist or single tracks.")
+                return
+            except Exception as e:
+                logger.warning(f"SpotDL playlist execution error: {e}")
+
+        # If spotdl produced files, upload them
+        if files:
+            files = files[:PLAYLIST_LIMIT]
+            await safe_edit(query, f"📤 *Uploading {len(files)} tracks...*")
+
+            sent = 0
+            for i, fpath in enumerate(files, 1):
+                try:
+                    await safe_edit(query, f"📤 Uploading track *{i}/{len(files)}*\n`{fpath.stem[:40]}`")
+                    sz = fpath.stat().st_size / (1024 * 1024)
+                    cover_bytes = extract_audio_cover(str(fpath))
+                    with open(fpath, "rb") as f:
+                        await send_upload(
+                            lambda: upload_call(
+                                f,
+                                query.message.reply_audio,
+                                audio=f,
+                                title=fpath.stem,
+                                performer="Spotify",
+                                thumbnail=cover_bytes,
+                                caption=final_caption(
+                                    query,
+                                    title=fpath.stem,
+                                    platform="spotify",
+                                    url=url,
+                                ),
+                                **UPLOAD_TIMEOUTS,
+                            )
+                        )
+                    sent += 1
+                    record_download(query.from_user.id, "audio", sz, True)
+                except Exception as e:
+                    logger.error(f"Playlist upload track {i} failed: {e}")
+                    continue
+
+            try:
+                await query.message.delete()
+            except Exception:
+                await safe_edit(query, f"✅ *Playlist done!*\n\nSent *{sent}/{len(files)}* tracks successfully.")
             return
 
-        # Find downloaded files. spotdl may create artist/playlist subfolders.
-        files = []
-        for ext in [audio_format, "mp3", "m4a", "opus", "flac", "wav"]:
-            files = sorted(Path(tmpdir).rglob(f"*.{ext}"))
-            if files:
-                break
-
-        files = files[:PLAYLIST_LIMIT]
-
-        if not files:
-            logger.error(f"Playlist stderr: {proc.stderr[:500]}")
-            await safe_edit(query, f"❌ *No tracks downloaded.*\n\nspotdl couldn't find matches for this Spotify {collection_type.lower()}.")
+        # Fallback: Extract tracks via Spotify Embed metadata and download with high precision
+        logger.info(f"Using high-precision native downloader for Spotify {collection_type}: {url}")
+        meta = await fetch_spotify_metadata(url)
+        track_list = meta.get("track_list", [])
+        if not track_list:
+            await safe_edit(query, f"❌ *No tracks found.*\n\nCould not extract tracks from this Spotify {collection_type.lower()}.")
             record_download(query.from_user.id, "audio", 0, False)
             return
 
-        await safe_edit(query, f"📤 *Uploading {len(files)} tracks...*")
+        track_list = track_list[:PLAYLIST_LIMIT]
+        await safe_edit(query, f"🎵 *Spotify {collection_type}*\n\nFound *{len(track_list)} tracks*.\nDownloading and sending one by one ⏳")
 
         sent = 0
-        for i, fpath in enumerate(files, 1):
-            try:
-                await safe_edit(query, f"📤 Uploading track *{i}/{len(files)}*\n`{fpath.stem[:40]}`")
-                sz = fpath.stat().st_size / (1024 * 1024)
-                cover_bytes = extract_audio_cover(str(fpath))
+        for i, track_info in enumerate(track_list, 1):
+            t_title = track_info.get("title", "")
+            t_artist = track_info.get("artist", "")
+            t_album = track_info.get("album", "") or meta.get("title", "")
+            t_dur = track_info.get("duration", 0.0)
+            t_cover_url = track_info.get("cover_url") or meta.get("cover_url", "")
+            t_thumb_bytes = fetch_thumb(t_cover_url) if t_cover_url else None
+
+            await safe_edit(query, f"⬇️ *Downloading ({i}/{len(track_list)})*\n🎵 `{t_title[:35]}`\n👤 `{t_artist[:35]}`")
+
+            cand = await find_best_youtube_match(
+                artist=t_artist,
+                title=t_title,
+                duration=t_dur,
+                artists_list=track_info.get("artists", []),
+            )
+            if not cand:
+                logger.warning(f"Could not find match for '{t_title}' by '{t_artist}'")
+                continue
+
+            vid_url = cand.get("webpage_url") or cand.get("url") or f"https://www.youtube.com/watch?v={cand.get('id')}"
+            with tempfile.TemporaryDirectory(dir=DOWNLOAD_PATH) as track_tmp:
+                fpath = await download_media(
+                    vid_url,
+                    fmt="audio",
+                    quality="audio",
+                    out_dir=track_tmp,
+                    audio_format=audio_format,
+                    audio_quality=audio_quality,
+                )
+                if not fpath or not Path(fpath).exists():
+                    continue
+
+                embed_audio_metadata(fpath, {
+                    "title": t_title,
+                    "artist": t_artist,
+                    "album": t_album,
+                    "release_year": meta.get("release_year"),
+                }, t_thumb_bytes)
+
+                sz = Path(fpath).stat().st_size / (1024 * 1024)
                 with open(fpath, "rb") as f:
                     await send_upload(
                         lambda: upload_call(
                             f,
                             query.message.reply_audio,
                             audio=f,
-                            title=fpath.stem,
-                            performer="Spotify",
-                            thumbnail=cover_bytes,
+                            title=t_title,
+                            performer=t_artist,
+                            thumbnail=t_thumb_bytes or extract_audio_cover(fpath),
+                            duration=int(t_dur) if t_dur else None,
                             caption=final_caption(
                                 query,
-                                title=fpath.stem,
+                                title=f"{t_artist} - {t_title}",
                                 platform="spotify",
                                 url=url,
                             ),
@@ -559,14 +642,11 @@ async def handle_spotify_playlist(query, url: str, audio_format: str, audio_qual
                     )
                 sent += 1
                 record_download(query.from_user.id, "audio", sz, True)
-            except Exception as e:
-                logger.error(f"Playlist upload track {i} failed: {e}")
-                continue
 
         try:
             await query.message.delete()
         except Exception:
-            await safe_edit(query, f"✅ *Playlist done!*\n\nSent *{sent}/{len(files)}* tracks successfully.")
+            await safe_edit(query, f"✅ *Playlist done!*\n\nSent *{sent}/{len(track_list)}* tracks successfully.")
 
 
 # ─── Core download + upload ────────────────────────────────────────────────────
@@ -888,9 +968,9 @@ async def handle_download(
                 size_mb = Path(filepath).stat().st_size / (1024 * 1024)
 
                 # Get metadata
-                info = await get_info(url) if platform not in ("spotify", "direct") else None
+                info = await get_info(url) if platform != "direct" else None
                 title = (info.get("title") if info else None) or Path(filepath).stem
-                artist = (info.get("uploader") or info.get("channel") or "Unknown") if info else "Unknown"
+                artist = (info.get("uploader") or info.get("channel") or info.get("artist") or "Unknown") if info else "Unknown"
                 thumb_bytes = fetch_thumb(info.get("thumbnail") if info else None)
 
                 upload_paths = [filepath]
@@ -968,13 +1048,14 @@ async def handle_download(
                         if fmt == "audio" or platform == "spotify":
                             cached_media_type = "audio"
                             audio_thumb = thumb_bytes or extract_audio_cover(part_path)
-                            embed_mp3_metadata(part_path, info or {"title": title, "uploader": artist}, audio_thumb)
+                            embed_audio_metadata(part_path, info or {"title": title, "uploader": artist, "artist": artist}, audio_thumb)
                             with open(part_path, "rb") as f:
                                 upload_file = make_upload_input(
                                     part_path,
                                     f,
                                     make_upload_callback("Audio", part_label, part_name),
                                 )
+                                audio_dur = int(info.get("duration", 0)) if info and info.get("duration") else None
                                 sent_message = await send_upload(
                                     lambda: upload_call(
                                         upload_file.input_file_content,
@@ -983,6 +1064,7 @@ async def handle_download(
                                         title=title,
                                         performer=artist,
                                         thumbnail=audio_thumb,
+                                        duration=audio_dur,
                                         caption=final_caption(
                                             query,
                                             part_label,
